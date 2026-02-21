@@ -1,7 +1,10 @@
+pub mod auth;
+pub mod docs;
 pub mod errors;
 pub mod handlers;
 pub mod metrics;
 pub mod models;
+pub mod validation;
 pub mod ws;
 
 use axum::error_handling::HandleErrorLayer;
@@ -20,6 +23,25 @@ use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::Instrument;
+use utoipa::OpenApi;
+
+pub struct RouterConfig {
+    pub rate_limit_rps: u64,
+    pub max_concurrent: usize,
+    pub request_timeout_secs: u64,
+    pub max_body_size: usize,
+}
+
+impl Default for RouterConfig {
+    fn default() -> Self {
+        Self {
+            rate_limit_rps: config::RATE_LIMIT_RPS,
+            max_concurrent: config::MAX_CONCURRENT_REQUESTS,
+            request_timeout_secs: config::REQUEST_TIMEOUT_SECS,
+            max_body_size: config::MAX_REQUEST_BODY_BYTES,
+        }
+    }
+}
 
 async fn request_id_middleware(
     req: axum::http::Request<axum::body::Body>,
@@ -51,19 +73,29 @@ async fn metrics_middleware(
     response
 }
 
-pub fn create_router(state: AppState) -> Router {
+async fn docs_handler() -> impl axum::response::IntoResponse {
+    axum::Json(docs::ApiDoc::openapi())
+}
+
+pub fn create_router(state: AppState, router_config: RouterConfig) -> Router {
     Router::new()
         .route("/ws", get(ws::ws_handler))
         .route("/health", get(handlers::health))
+        .route("/ready", get(handlers::ready))
         .route("/stats", get(handlers::stats))
         .route("/submit", post(handlers::submit))
         .route("/metrics", get(handlers::metrics_endpoint))
+        .route("/docs", get(docs_handler))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::auth_middleware,
+        ))
         .layer(middleware::from_fn(metrics_middleware))
         .layer(middleware::from_fn(request_id_middleware))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
-        .layer(DefaultBodyLimit::max(config::MAX_REQUEST_BODY_BYTES))
+        .layer(DefaultBodyLimit::max(router_config.max_body_size))
         .layer(
             ServiceBuilder::new()
                 .layer(HandleErrorLayer::new(|err: tower::BoxError| async move {
@@ -74,13 +106,13 @@ pub fn create_router(state: AppState) -> Router {
                     }
                 }))
                 .layer(BufferLayer::new(1024))
-                .layer(ConcurrencyLimitLayer::new(config::MAX_CONCURRENT_REQUESTS))
+                .layer(ConcurrencyLimitLayer::new(router_config.max_concurrent))
                 .layer(RateLimitLayer::new(
-                    config::RATE_LIMIT_RPS,
+                    router_config.rate_limit_rps,
                     Duration::from_secs(1),
                 ))
                 .layer(TimeoutLayer::new(Duration::from_secs(
-                    config::REQUEST_TIMEOUT_SECS,
+                    router_config.request_timeout_secs,
                 ))),
         )
         .with_state(state)

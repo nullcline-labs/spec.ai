@@ -88,3 +88,92 @@ impl Retriever for VectorsDbRetriever {
             .collect())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn test_search_success() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/collections/test_col/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{
+                    "id": "550e8400-e29b-41d4-a716-446655440000",
+                    "text": "hello world",
+                    "score": 0.95,
+                    "metadata": {}
+                }]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let retriever = VectorsDbRetriever::new(VectorsDbRetrieverConfig {
+            base_url: mock_server.uri(),
+            collection: "test_col".into(),
+            api_key: None,
+            timeout: Duration::from_secs(5),
+        });
+        let results = retriever.search(&vec![0.1, 0.2, 0.3], 10).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].text, "hello world");
+        assert!((results[0].score - 0.95).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn test_search_api_error() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/collections/test_col/search"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("database unavailable"))
+            .mount(&mock_server)
+            .await;
+
+        let retriever = VectorsDbRetriever::new(VectorsDbRetrieverConfig {
+            base_url: mock_server.uri(),
+            collection: "test_col".into(),
+            api_key: None,
+            timeout: Duration::from_secs(5),
+        });
+        let result = retriever.search(&vec![0.1, 0.2, 0.3], 10).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            RetrieveError::Api { status, body } => {
+                assert_eq!(status, 500);
+                assert_eq!(body, "database unavailable");
+            }
+            other => panic!("Expected Api error, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_search_with_api_key() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/collections/test_col/search"))
+            .and(header("Authorization", "Bearer my-secret-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "results": [{
+                    "id": "550e8400-e29b-41d4-a716-446655440000",
+                    "text": "authenticated result",
+                    "score": 0.99,
+                    "metadata": {}
+                }]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let retriever = VectorsDbRetriever::new(VectorsDbRetrieverConfig {
+            base_url: mock_server.uri(),
+            collection: "test_col".into(),
+            api_key: Some("my-secret-key".into()),
+            timeout: Duration::from_secs(5),
+        });
+        let results = retriever.search(&vec![0.1, 0.2, 0.3], 10).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].text, "authenticated result");
+    }
+}

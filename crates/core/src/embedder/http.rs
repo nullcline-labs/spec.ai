@@ -71,3 +71,102 @@ impl Embedder for HttpEmbedder {
             .ok_or_else(|| EmbedError::InvalidResponse("Empty data array".into()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{header, method};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn test_embed_success() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"embedding": [0.1, 0.2, 0.3]}]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let embedder = HttpEmbedder::new(HttpEmbedderConfig {
+            url: mock_server.uri(),
+            model: "test-model".into(),
+            api_key: None,
+            timeout: Duration::from_secs(5),
+        });
+        let result = embedder.embed("hello").await.unwrap();
+        assert_eq!(result, vec![0.1_f32, 0.2_f32, 0.3_f32]);
+    }
+
+    #[tokio::test]
+    async fn test_embed_api_error() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("internal server error"))
+            .mount(&mock_server)
+            .await;
+
+        let embedder = HttpEmbedder::new(HttpEmbedderConfig {
+            url: mock_server.uri(),
+            model: "test-model".into(),
+            api_key: None,
+            timeout: Duration::from_secs(5),
+        });
+        let result = embedder.embed("hello").await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            EmbedError::Api { status, body } => {
+                assert_eq!(status, 500);
+                assert_eq!(body, "internal server error");
+            }
+            other => panic!("Expected Api error, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_embed_with_api_key() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(header("Authorization", "Bearer test-secret-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"embedding": [0.5, 0.6]}]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let embedder = HttpEmbedder::new(HttpEmbedderConfig {
+            url: mock_server.uri(),
+            model: "test-model".into(),
+            api_key: Some("test-secret-key".into()),
+            timeout: Duration::from_secs(5),
+        });
+        let result = embedder.embed("hello").await.unwrap();
+        assert_eq!(result, vec![0.5_f32, 0.6_f32]);
+    }
+
+    #[tokio::test]
+    async fn test_embed_empty_response() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": []
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let embedder = HttpEmbedder::new(HttpEmbedderConfig {
+            url: mock_server.uri(),
+            model: "test-model".into(),
+            api_key: None,
+            timeout: Duration::from_secs(5),
+        });
+        let result = embedder.embed("hello").await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            EmbedError::InvalidResponse(msg) => {
+                assert!(msg.contains("Empty data array"));
+            }
+            other => panic!("Expected InvalidResponse error, got: {other:?}"),
+        }
+    }
+}

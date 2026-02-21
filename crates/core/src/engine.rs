@@ -86,6 +86,15 @@ impl Engine {
         }
     }
 
+    /// Check that both the embedding service and vector database are reachable.
+    pub async fn check_readiness(&self) -> Result<(), EngineError> {
+        // Attempt a simple embedding to verify the embedding service is reachable
+        let embedding = self.embedder.embed("health check").await?;
+        // Attempt a search to verify the vector database is reachable
+        let _ = self.retriever.search(&embedding, 1).await?;
+        Ok(())
+    }
+
     /// Speculate: embed a partial query and pre-fetch results (background).
     pub async fn speculate(
         &self,
@@ -213,5 +222,269 @@ impl Engine {
 
     pub fn cache(&self) -> &Arc<SpeculativeCache> {
         &self.cache
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cache::SpeculativeCache;
+    use std::sync::Mutex;
+
+    struct MockEmbedder {
+        embedding: Mutex<Embedding>,
+        should_fail: Mutex<bool>,
+    }
+
+    impl MockEmbedder {
+        fn new(embedding: Embedding) -> Self {
+            Self {
+                embedding: Mutex::new(embedding),
+                should_fail: Mutex::new(false),
+            }
+        }
+
+        fn set_failing(&self, fail: bool) {
+            *self.should_fail.lock().unwrap() = fail;
+        }
+
+        fn set_embedding(&self, emb: Embedding) {
+            *self.embedding.lock().unwrap() = emb;
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::embedder::Embedder for MockEmbedder {
+        async fn embed(&self, _text: &str) -> Result<Embedding, crate::embedder::EmbedError> {
+            if *self.should_fail.lock().unwrap() {
+                return Err(crate::embedder::EmbedError::Api {
+                    status: 500,
+                    body: "mock error".into(),
+                });
+            }
+            Ok(self.embedding.lock().unwrap().clone())
+        }
+    }
+
+    struct MockRetriever {
+        documents: Vec<Document>,
+        should_fail: Mutex<bool>,
+    }
+
+    impl MockRetriever {
+        fn new(documents: Vec<Document>) -> Self {
+            Self {
+                documents,
+                should_fail: Mutex::new(false),
+            }
+        }
+
+        fn set_failing(&self, fail: bool) {
+            *self.should_fail.lock().unwrap() = fail;
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::retriever::Retriever for MockRetriever {
+        async fn search(
+            &self,
+            _embedding: &Embedding,
+            _top_k: usize,
+        ) -> Result<Vec<Document>, crate::retriever::RetrieveError> {
+            if *self.should_fail.lock().unwrap() {
+                return Err(crate::retriever::RetrieveError::Api {
+                    status: 500,
+                    body: "mock error".into(),
+                });
+            }
+            Ok(self.documents.clone())
+        }
+    }
+
+    fn make_doc(text: &str) -> Document {
+        Document {
+            id: uuid::Uuid::new_v4(),
+            text: text.to_string(),
+            score: 0.95,
+            metadata: Default::default(),
+        }
+    }
+
+    fn make_engine(
+        embedding: Embedding,
+        documents: Vec<Document>,
+    ) -> (Arc<Engine>, Arc<MockEmbedder>, Arc<MockRetriever>) {
+        let embedder = Arc::new(MockEmbedder::new(embedding));
+        let retriever = Arc::new(MockRetriever::new(documents));
+        let cache = Arc::new(SpeculativeCache::new(60, 5));
+        let config = EngineConfig::default();
+        let engine = Arc::new(Engine::new(
+            embedder.clone(),
+            retriever.clone(),
+            cache,
+            config,
+        ));
+        (engine, embedder, retriever)
+    }
+
+    #[tokio::test]
+    async fn test_speculate_stores_in_cache() {
+        let docs = vec![make_doc("doc1"), make_doc("doc2")];
+        let (engine, _, _) = make_engine(vec![1.0, 0.0, 0.0], docs);
+
+        let session = "session1".to_string();
+        engine
+            .speculate(&session, "how to configure")
+            .await
+            .unwrap();
+
+        let cached = engine.cache().get_latest(&session);
+        assert!(cached.is_some());
+        assert_eq!(cached.unwrap().query, "how to configure");
+    }
+
+    #[tokio::test]
+    async fn test_speculate_skips_short_query() {
+        let docs = vec![make_doc("doc1")];
+        let (engine, _, _) = make_engine(vec![1.0, 0.0, 0.0], docs);
+
+        let session = "session1".to_string();
+        // MIN_QUERY_LENGTH is 3, so "ab" should be skipped
+        engine.speculate(&session, "ab").await.unwrap();
+
+        let cached = engine.cache().get_latest(&session);
+        assert!(cached.is_none());
+        assert_eq!(engine.cache().entry_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_submit_cache_hit() {
+        let docs = vec![make_doc("result1")];
+        let (engine, _, _) = make_engine(vec![1.0, 0.0, 0.0], docs);
+
+        let session = "session1".to_string();
+        // Speculate and submit with the same embedding => cosine similarity = 1.0 => Hit
+        engine
+            .speculate(&session, "how to configure auth")
+            .await
+            .unwrap();
+        let result = engine
+            .submit(&session, "how to configure auth")
+            .await
+            .unwrap();
+
+        assert_eq!(result.verdict, CacheVerdict::Hit);
+        assert_eq!(result.documents.len(), 1);
+        assert_eq!(result.documents[0].text, "result1");
+    }
+
+    #[tokio::test]
+    async fn test_submit_cache_miss() {
+        let docs = vec![make_doc("result1")];
+        let (engine, embedder, _) = make_engine(vec![1.0, 0.0, 0.0], docs);
+
+        let session = "session1".to_string();
+        // Speculate with embedding [1,0,0]
+        engine
+            .speculate(&session, "how to configure auth")
+            .await
+            .unwrap();
+
+        // Change embedding to orthogonal vector => cosine similarity = 0.0 => Miss
+        embedder.set_embedding(vec![0.0, 1.0, 0.0]);
+        let result = engine
+            .submit(&session, "something completely different")
+            .await
+            .unwrap();
+
+        assert_eq!(result.verdict, CacheVerdict::Miss);
+    }
+
+    #[tokio::test]
+    async fn test_submit_no_cache() {
+        let docs = vec![make_doc("result1")];
+        let (engine, _, _) = make_engine(vec![1.0, 0.0, 0.0], docs);
+
+        let session = "session1".to_string();
+        // Submit without prior speculation => Miss
+        let result = engine
+            .submit(&session, "how to configure auth")
+            .await
+            .unwrap();
+
+        assert_eq!(result.verdict, CacheVerdict::Miss);
+    }
+
+    #[tokio::test]
+    async fn test_close_session_removes_cache() {
+        let docs = vec![make_doc("doc1")];
+        let (engine, _, _) = make_engine(vec![1.0, 0.0, 0.0], docs);
+
+        let session = "session1".to_string();
+        engine
+            .speculate(&session, "how to configure auth")
+            .await
+            .unwrap();
+        assert!(engine.cache().get_latest(&session).is_some());
+
+        engine.close_session(&session);
+        assert!(engine.cache().get_latest(&session).is_none());
+        assert_eq!(engine.cache().session_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_stats_counts() {
+        let docs = vec![make_doc("doc1")];
+        let (engine, _, _) = make_engine(vec![1.0, 0.0, 0.0], docs);
+
+        let session = "session1".to_string();
+        engine.speculate(&session, "query one").await.unwrap();
+        engine.speculate(&session, "query two").await.unwrap();
+        engine.submit(&session, "final query").await.unwrap();
+
+        let stats = engine.stats();
+        assert_eq!(stats.predictions_total, 2);
+        assert_eq!(stats.submissions_total, 1);
+        // Same embedding for both speculate and submit => Hit
+        assert_eq!(stats.cache_hits, 1);
+    }
+
+    #[tokio::test]
+    async fn test_speculate_embed_failure() {
+        let docs = vec![make_doc("doc1")];
+        let (engine, embedder, _) = make_engine(vec![1.0, 0.0, 0.0], docs);
+
+        embedder.set_failing(true);
+        let session = "session1".to_string();
+        let result = engine.speculate(&session, "how to configure auth").await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, EngineError::Embed(_)));
+    }
+
+    #[tokio::test]
+    async fn test_submit_retriever_failure() {
+        let docs = vec![make_doc("doc1")];
+        let (engine, embedder, retriever) = make_engine(vec![1.0, 0.0, 0.0], docs);
+
+        let session = "session1".to_string();
+        // Speculate successfully
+        engine
+            .speculate(&session, "how to configure auth")
+            .await
+            .unwrap();
+
+        // Change embedding so we get a Miss (which triggers retriever.search)
+        embedder.set_embedding(vec![0.0, 1.0, 0.0]);
+        retriever.set_failing(true);
+
+        let result = engine
+            .submit(&session, "something completely different")
+            .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, EngineError::Retrieve(_)));
     }
 }

@@ -51,9 +51,9 @@ impl SpeculativeCache {
 
         if entry.results.len() >= self.max_entries_per_session {
             entry.results.pop_front();
-        } else {
-            self.total_entries.fetch_add(1, Ordering::Relaxed);
+            self.total_entries.fetch_sub(1, Ordering::Relaxed);
         }
+        self.total_entries.fetch_add(1, Ordering::Relaxed);
         entry.results.push_back(result);
     }
 
@@ -144,6 +144,31 @@ mod tests {
         cache.remove_session(&sid);
         assert_eq!(cache.entry_count(), 0);
         assert!(cache.get_latest(&sid).is_none());
+    }
+
+    #[test]
+    fn test_counter_across_many_inserts() {
+        let cache = SpeculativeCache::new(60, 2);
+        let sid = "s1".to_string();
+
+        cache.insert(&sid, make_result("a"));
+        assert_eq!(cache.entry_count(), 1);
+
+        cache.insert(&sid, make_result("b"));
+        assert_eq!(cache.entry_count(), 2);
+
+        // overflow: ring buffer pops "a", pushes "c"
+        cache.insert(&sid, make_result("c"));
+        assert_eq!(cache.entry_count(), 2);
+
+        cache.insert(&sid, make_result("d"));
+        assert_eq!(cache.entry_count(), 2);
+
+        cache.insert(&sid, make_result("e"));
+        assert_eq!(cache.entry_count(), 2);
+
+        // verify latest is correct
+        assert_eq!(cache.get_latest(&sid).unwrap().query, "e");
     }
 
     #[test]

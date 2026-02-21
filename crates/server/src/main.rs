@@ -1,13 +1,17 @@
 use clap::Parser;
 use specai_core::cache::eviction::spawn_eviction_task;
 use specai_core::cache::SpeculativeCache;
+use specai_core::circuit_breaker::CircuitBreaker;
 use specai_core::config;
+use specai_core::embedder::guarded::GuardedEmbedder;
 use specai_core::embedder::http::{HttpEmbedder, HttpEmbedderConfig};
 use specai_core::engine::{Engine, EngineConfig};
+use specai_core::retriever::guarded::GuardedRetriever;
 use specai_core::retriever::vectorsdb::{VectorsDbRetriever, VectorsDbRetrieverConfig};
 use specai_core::similarity::SimilarityGateConfig;
 use specai_server::api::create_router;
 use specai_server::api::handlers::AppState;
+use specai_server::api::RouterConfig;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing_subscriber::EnvFilter;
@@ -50,6 +54,21 @@ struct Args {
 
     #[arg(long, default_value_t = config::DEFAULT_CACHE_TTL_SECS)]
     cache_ttl: u64,
+
+    #[arg(long, default_value_t = config::RATE_LIMIT_RPS)]
+    rate_limit_rps: u64,
+
+    #[arg(long, default_value_t = config::MAX_CONCURRENT_REQUESTS)]
+    max_concurrent: usize,
+
+    #[arg(long, default_value_t = config::REQUEST_TIMEOUT_SECS)]
+    request_timeout: u64,
+
+    #[arg(long, default_value_t = config::MAX_REQUEST_BODY_BYTES)]
+    max_body_size: usize,
+
+    #[arg(long)]
+    api_key: Option<String>,
 }
 
 #[tokio::main]
@@ -71,6 +90,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let vectorsdb_api_key = args
         .vectorsdb_api_key
         .or_else(|| std::env::var("SPECAI_VECTORSDB_API_KEY").ok());
+
+    if let Some(ref key) = embedding_api_key {
+        if key.trim().is_empty() {
+            tracing::warn!("SPECAI_EMBEDDING_API_KEY is set but empty — requests may fail");
+        }
+    }
+    if let Some(ref key) = vectorsdb_api_key {
+        if key.trim().is_empty() {
+            tracing::warn!("SPECAI_VECTORSDB_API_KEY is set but empty — requests may fail");
+        }
+    }
 
     let embedder = Arc::new(HttpEmbedder::new(HttpEmbedderConfig {
         url: args.embedding_url.clone(),
@@ -100,9 +130,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     };
 
+    let embed_circuit = Arc::new(CircuitBreaker::new(
+        config::CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+        Duration::from_secs(config::CIRCUIT_BREAKER_RECOVERY_SECS),
+    ));
+    let retrieve_circuit = Arc::new(CircuitBreaker::new(
+        config::CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+        Duration::from_secs(config::CIRCUIT_BREAKER_RECOVERY_SECS),
+    ));
+
+    let guarded_embedder: Arc<GuardedEmbedder> =
+        Arc::new(GuardedEmbedder::new(embedder, embed_circuit));
+    let guarded_retriever: Arc<GuardedRetriever> =
+        Arc::new(GuardedRetriever::new(retriever, retrieve_circuit));
+
     let engine = Arc::new(Engine::new(
-        embedder,
-        retriever,
+        guarded_embedder,
+        guarded_retriever,
         cache.clone(),
         engine_config,
     ));
@@ -125,9 +169,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         engine,
         prometheus_handle,
         start_time: Instant::now(),
+        debounce_ms: args.debounce_ms,
+        api_key: args.api_key,
     };
 
-    let app = create_router(state);
+    let router_config = RouterConfig {
+        rate_limit_rps: args.rate_limit_rps,
+        max_concurrent: args.max_concurrent,
+        request_timeout_secs: args.request_timeout,
+        max_body_size: args.max_body_size,
+    };
+
+    let app = create_router(state, router_config);
     let addr = format!("0.0.0.0:{}", args.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 

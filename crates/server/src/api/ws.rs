@@ -6,13 +6,15 @@ use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use specai_core::config;
 use specai_core::engine::Engine;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 use tokio::time::sleep;
 
 use super::handlers::AppState;
+use super::validation;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -49,10 +51,11 @@ pub enum ServerMessage {
 }
 
 pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_socket(socket, state.engine.clone()))
+    let debounce_ms = state.debounce_ms;
+    ws.on_upgrade(move |socket| handle_socket(socket, state.engine.clone(), debounce_ms))
 }
 
-async fn handle_socket(socket: WebSocket, engine: Arc<Engine>) {
+async fn handle_socket(socket: WebSocket, engine: Arc<Engine>, debounce_ms: u64) {
     let (mut sender, mut receiver) = socket.split();
     let (tx, mut rx) = mpsc::channel::<ServerMessage>(64);
 
@@ -69,6 +72,12 @@ async fn handle_socket(socket: WebSocket, engine: Arc<Engine>) {
 
     // Per-session debounce tracking
     let debounce_handles: Arc<DashMap<String, AbortHandle>> = Arc::new(DashMap::new());
+
+    // Track all sessions seen on this connection for cleanup
+    let mut seen_sessions: HashSet<String> = HashSet::new();
+
+    // Per-session keystroke rate limiting
+    let mut keystroke_counts: HashMap<String, (u64, Instant)> = HashMap::new();
 
     while let Some(Ok(msg)) = receiver.next().await {
         let text = match msg {
@@ -91,6 +100,46 @@ async fn handle_socket(socket: WebSocket, engine: Arc<Engine>) {
 
         match client_msg {
             ClientMessage::Keystroke { session_id, text } => {
+                // Validate input
+                if let Err(e) = validation::validate_session_id(&session_id) {
+                    let _ = tx
+                        .send(ServerMessage::Error {
+                            message: e.to_string(),
+                        })
+                        .await;
+                    continue;
+                }
+                if let Err(e) = validation::validate_query(&text) {
+                    let _ = tx
+                        .send(ServerMessage::Error {
+                            message: e.to_string(),
+                        })
+                        .await;
+                    continue;
+                }
+
+                // Per-session rate limiting
+                let now = Instant::now();
+                let (count, window_start) = keystroke_counts
+                    .entry(session_id.clone())
+                    .or_insert((0, now));
+                if now.duration_since(*window_start) >= Duration::from_secs(1) {
+                    *count = 0;
+                    *window_start = now;
+                }
+                *count += 1;
+                if *count > config::MAX_KEYSTROKES_PER_SECOND {
+                    let _ = tx
+                        .send(ServerMessage::Error {
+                            message: "Rate limit exceeded: too many keystrokes per second"
+                                .to_string(),
+                        })
+                        .await;
+                    continue;
+                }
+
+                seen_sessions.insert(session_id.clone());
+
                 // Cancel previous pending speculation for this session
                 if let Some(prev) = debounce_handles.get(&session_id) {
                     prev.abort();
@@ -103,7 +152,7 @@ async fn handle_socket(socket: WebSocket, engine: Arc<Engine>) {
                 let handles = debounce_handles.clone();
 
                 let handle = tokio::spawn(async move {
-                    sleep(Duration::from_millis(config::DEFAULT_DEBOUNCE_MS)).await;
+                    sleep(Duration::from_millis(debounce_ms)).await;
 
                     let _ = tx
                         .send(ServerMessage::Speculating {
@@ -112,7 +161,7 @@ async fn handle_socket(socket: WebSocket, engine: Arc<Engine>) {
                         })
                         .await;
 
-                    let start = std::time::Instant::now();
+                    let start = Instant::now();
                     match engine.speculate(&sid, &query).await {
                         Ok(()) => {
                             let latency_ms = start.elapsed().as_millis() as u64;
@@ -132,6 +181,11 @@ async fn handle_socket(socket: WebSocket, engine: Arc<Engine>) {
                         }
                         Err(e) => {
                             tracing::warn!(session = %sid, "Speculation failed: {}", e);
+                            let _ = tx
+                                .send(ServerMessage::Error {
+                                    message: format!("Speculation failed: {}", e),
+                                })
+                                .await;
                         }
                     }
                     handles.remove(&sid);
@@ -141,6 +195,26 @@ async fn handle_socket(socket: WebSocket, engine: Arc<Engine>) {
             }
 
             ClientMessage::Submit { session_id, query } => {
+                // Validate input
+                if let Err(e) = validation::validate_session_id(&session_id) {
+                    let _ = tx
+                        .send(ServerMessage::Error {
+                            message: e.to_string(),
+                        })
+                        .await;
+                    continue;
+                }
+                if let Err(e) = validation::validate_query(&query) {
+                    let _ = tx
+                        .send(ServerMessage::Error {
+                            message: e.to_string(),
+                        })
+                        .await;
+                    continue;
+                }
+
+                seen_sessions.insert(session_id.clone());
+
                 // Cancel any pending speculation
                 if let Some(prev) = debounce_handles.get(&session_id) {
                     prev.abort();
@@ -174,16 +248,38 @@ async fn handle_socket(socket: WebSocket, engine: Arc<Engine>) {
             }
 
             ClientMessage::Close { session_id } => {
+                if let Err(e) = validation::validate_session_id(&session_id) {
+                    let _ = tx
+                        .send(ServerMessage::Error {
+                            message: e.to_string(),
+                        })
+                        .await;
+                    continue;
+                }
+
                 if let Some(prev) = debounce_handles.get(&session_id) {
                     prev.abort();
                 }
                 debounce_handles.remove(&session_id);
+                seen_sessions.remove(&session_id);
                 engine.close_session(&session_id);
                 break;
             }
         }
     }
 
+    // Cleanup: close all sessions that were active on this connection
+    for sid in &seen_sessions {
+        if let Some(prev) = debounce_handles.get(sid) {
+            prev.abort();
+        }
+        debounce_handles.remove(sid);
+        engine.close_session(sid);
+    }
+
     send_task.abort();
-    tracing::debug!("WebSocket connection closed");
+    tracing::debug!(
+        cleaned_sessions = seen_sessions.len(),
+        "WebSocket connection closed"
+    );
 }

@@ -24,6 +24,7 @@ metrics-exporter-prometheus = "0.16"
 futures = "0.3"
 async-trait = "0.1"
 thiserror = "2"
+utoipa = { version = "5", features = ["axum_extras", "uuid"] }
 
 [profile.release]
 lto = "fat"

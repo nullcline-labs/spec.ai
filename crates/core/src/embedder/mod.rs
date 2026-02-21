@@ -1,3 +1,4 @@
+pub mod guarded;
 pub mod http;
 
 use crate::types::Embedding;
@@ -16,4 +17,9 @@ pub enum EmbedError {
 #[async_trait::async_trait]
 pub trait Embedder: Send + Sync + 'static {
     async fn embed(&self, text: &str) -> Result<Embedding, EmbedError>;
+
+    /// Health check that verifies the embedder is responsive.
+    async fn health_check(&self) -> Result<(), EmbedError> {
+        self.embed("health").await.map(|_| ())
+    }
 }

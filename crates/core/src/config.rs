@@ -54,3 +54,18 @@ pub const CACHE_EVICTION_INTERVAL_SECS: u64 = 15;
 
 /// Minimum query length to trigger speculation.
 pub const MIN_QUERY_LENGTH: usize = 3;
+
+/// Maximum session ID length in characters.
+pub const MAX_SESSION_ID_LENGTH: usize = 128;
+
+/// Maximum query length in characters.
+pub const MAX_QUERY_LENGTH: usize = 2000;
+
+/// Maximum keystrokes per second per session (WebSocket rate limit).
+pub const MAX_KEYSTROKES_PER_SECOND: u64 = 20;
+
+/// Circuit breaker: consecutive failures before opening.
+pub const CIRCUIT_BREAKER_FAILURE_THRESHOLD: u64 = 5;
+
+/// Circuit breaker: seconds to wait before half-open.
+pub const CIRCUIT_BREAKER_RECOVERY_SECS: u64 = 30;

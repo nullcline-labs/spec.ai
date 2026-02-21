@@ -9,7 +9,7 @@ pub type SessionId = String;
 pub type Embedding = Vec<f32>;
 
 /// A retrieved document from the vector database.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Document {
     pub id: Uuid,
     pub text: String,
@@ -49,7 +49,7 @@ impl std::fmt::Display for CacheVerdict {
 }
 
 /// Engine statistics.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct EngineStats {
     pub predictions_total: u64,
     pub submissions_total: u64,

@@ -12,6 +12,13 @@ pub fn record_request(method: &str, path: &str, status: u16, duration: Duration)
 }
 
 pub fn update_engine_metrics(stats: &specai_core::types::EngineStats) {
+    gauge!("specai_predictions_total").set(stats.predictions_total as f64);
+    gauge!("specai_submissions_total").set(stats.submissions_total as f64);
+    gauge!("specai_cache_hits").set(stats.cache_hits as f64);
+    gauge!("specai_cache_partials").set(stats.cache_partials as f64);
+    gauge!("specai_cache_misses").set(stats.cache_misses as f64);
+    gauge!("specai_avg_speculation_latency_ms").set(stats.avg_speculation_latency_ms);
+    gauge!("specai_avg_submission_latency_ms").set(stats.avg_submission_latency_ms);
     gauge!("specai_active_sessions").set(stats.active_sessions as f64);
     gauge!("specai_cached_entries").set(stats.cached_entries as f64);
     gauge!("specai_cache_hit_rate").set(if stats.submissions_total > 0 {

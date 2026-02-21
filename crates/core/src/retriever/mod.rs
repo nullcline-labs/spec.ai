@@ -1,3 +1,4 @@
+pub mod guarded;
 pub mod vectorsdb;
 
 use crate::types::{Document, Embedding};
@@ -20,4 +21,9 @@ pub trait Retriever: Send + Sync + 'static {
         embedding: &Embedding,
         top_k: usize,
     ) -> Result<Vec<Document>, RetrieveError>;
+
+    /// Health check that verifies the retriever is responsive.
+    async fn health_check(&self) -> Result<(), RetrieveError> {
+        self.search(&vec![0.0], 1).await.map(|_| ())
+    }
 }

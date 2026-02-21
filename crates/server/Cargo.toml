@@ -24,3 +24,12 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 dashmap = { workspace = true }
+thiserror = { workspace = true }
+utoipa = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
+hyper = "1"
+http-body-util = "0.1"
+async-trait = { workspace = true }
