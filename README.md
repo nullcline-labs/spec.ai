@@ -1,6 +1,18 @@
-# spec.ai
+<p align="center">
+  <img src="https://win98icons.alexmeub.com/icons/png/doctor_watson.png" width="128" height="128" alt="spec.ai logo">
+</p>
 
-Speculative retrieval engine that reduces RAG latency by pre-executing embedding + vector search while users type.
+<h1 align="center">spec.ai</h1>
+
+<p align="center">
+  Speculative retrieval engine that reduces RAG latency by pre-executing embedding + vector search while users type.
+</p>
+
+<p align="center">
+  <a href="https://github.com/nullcline-labs/spec.ai/actions/workflows/ci.yml">
+    <img src="https://github.com/nullcline-labs/spec.ai/actions/workflows/ci.yml/badge.svg" alt="CI">
+  </a>
+</p>
 
 ## How It Works
 
