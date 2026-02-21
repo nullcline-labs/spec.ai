@@ -1,0 +1,26 @@
+[package]
+name = "specai-server"
+version.workspace = true
+edition.workspace = true
+description = "WebSocket + REST server for spec.ai"
+
+[[bin]]
+name = "spec-ai"
+path = "src/main.rs"
+
+[dependencies]
+specai-core = { path = "../core" }
+tokio = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+dashmap = { workspace = true }

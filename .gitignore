@@ -1,0 +1,7 @@
+/target/
+.DS_Store
+.cargo/
+.idea/
+.vscode/
+*.swp
+*.swo
