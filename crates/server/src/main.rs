@@ -229,6 +229,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let file_config = load_config_file(&args.config)?;
     merge_config(&mut args, &matches, file_config);
 
+    // Validate threshold ordering
+    if args.similarity_threshold < args.partial_threshold {
+        return Err(format!(
+            "similarity_threshold ({}) must be >= partial_threshold ({})",
+            args.similarity_threshold, args.partial_threshold
+        )
+        .into());
+    }
+
+    // Validate rerank_alpha bounds
+    if args.rerank && !(0.0..=1.0).contains(&args.rerank_alpha) {
+        return Err(format!(
+            "rerank_alpha ({}) must be between 0.0 and 1.0",
+            args.rerank_alpha
+        )
+        .into());
+    }
+
     // API key resolution: CLI > env var > config file (already merged above)
     let embedding_api_key = args
         .embedding_api_key
@@ -553,5 +571,149 @@ unknown_field = "bad""#;
         let args = result.unwrap();
         assert_eq!(args.tls_cert.unwrap().to_str().unwrap(), "cert.pem");
         assert_eq!(args.tls_key.unwrap().to_str().unwrap(), "key.pem");
+    }
+
+    #[test]
+    fn test_threshold_validation_rejects_inverted() {
+        let args = Args::try_parse_from([
+            "spec-ai",
+            "--similarity-threshold",
+            "0.5",
+            "--partial-threshold",
+            "0.9",
+        ])
+        .unwrap();
+        // similarity < partial should be rejected
+        assert!(args.similarity_threshold < args.partial_threshold);
+    }
+
+    #[test]
+    fn test_threshold_validation_accepts_valid() {
+        let args = Args::try_parse_from([
+            "spec-ai",
+            "--similarity-threshold",
+            "0.92",
+            "--partial-threshold",
+            "0.80",
+        ])
+        .unwrap();
+        assert!(args.similarity_threshold >= args.partial_threshold);
+    }
+
+    #[test]
+    fn test_rerank_alpha_bounds() {
+        let args = Args::try_parse_from(["spec-ai", "--rerank", "--rerank-alpha", "0.5"]).unwrap();
+        assert!((0.0..=1.0).contains(&args.rerank_alpha));
+    }
+
+    #[test]
+    fn test_allowed_origins_parsed() {
+        let args = Args::try_parse_from([
+            "spec-ai",
+            "--allowed-origins",
+            "https://app.example.com,https://staging.example.com",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.allowed_origins.as_deref(),
+            Some("https://app.example.com,https://staging.example.com")
+        );
+    }
+
+    #[test]
+    fn test_file_config_with_allowed_origins() {
+        let toml_str = r#"
+            allowed_origins = "https://app.example.com,https://staging.example.com"
+        "#;
+        let config: FileConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.allowed_origins.as_deref(),
+            Some("https://app.example.com,https://staging.example.com")
+        );
+    }
+
+    #[test]
+    fn test_merge_config_file_overrides_defaults() {
+        let matches = Args::command().get_matches_from(["spec-ai"]);
+        let mut args = Args::from_arg_matches(&matches).unwrap();
+
+        let file_config = FileConfig {
+            port: Some(9999),
+            embedding_url: Some("http://custom/v1/embeddings".to_string()),
+            embedding_model: Some("custom-model".to_string()),
+            vectorsdb_url: Some("http://custom:3030".to_string()),
+            collection: Some("custom_col".to_string()),
+            similarity_threshold: Some(0.95),
+            partial_threshold: Some(0.85),
+            top_k: Some(20),
+            debounce_ms: Some(500),
+            cache_ttl: Some(300),
+            rate_limit_rps: Some(100),
+            max_concurrent: Some(256),
+            request_timeout: Some(60),
+            max_body_size: Some(2048),
+            api_key: Some("file-key".to_string()),
+            rerank: Some(true),
+            rerank_alpha: Some(0.5),
+            embedding_api_key: Some("embed-key".to_string()),
+            vectorsdb_api_key: Some("db-key".to_string()),
+            allowed_origins: Some("https://example.com".to_string()),
+            tls_cert: Some("/path/to/cert.pem".to_string()),
+            tls_key: Some("/path/to/key.pem".to_string()),
+        };
+
+        merge_config(&mut args, &matches, file_config);
+
+        assert_eq!(args.port, 9999);
+        assert_eq!(args.embedding_url, "http://custom/v1/embeddings");
+        assert_eq!(args.embedding_model, "custom-model");
+        assert_eq!(args.top_k, 20);
+        assert_eq!(args.debounce_ms, 500);
+        assert!(args.rerank);
+        assert_eq!(args.rerank_alpha, 0.5);
+        assert_eq!(args.api_key.as_deref(), Some("file-key"));
+        assert_eq!(args.embedding_api_key.as_deref(), Some("embed-key"));
+        assert_eq!(args.vectorsdb_api_key.as_deref(), Some("db-key"));
+        assert_eq!(args.allowed_origins.as_deref(), Some("https://example.com"));
+        assert_eq!(
+            args.tls_cert.as_ref().unwrap().to_str().unwrap(),
+            "/path/to/cert.pem"
+        );
+        assert_eq!(
+            args.tls_key.as_ref().unwrap().to_str().unwrap(),
+            "/path/to/key.pem"
+        );
+    }
+
+    #[test]
+    fn test_merge_config_cli_overrides_file() {
+        let matches =
+            Args::command().get_matches_from(["spec-ai", "--port", "7777", "--top-k", "5"]);
+        let mut args = Args::from_arg_matches(&matches).unwrap();
+
+        let file_config = FileConfig {
+            port: Some(9999),
+            top_k: Some(20),
+            ..FileConfig::default()
+        };
+
+        merge_config(&mut args, &matches, file_config);
+
+        // CLI values should win
+        assert_eq!(args.port, 7777);
+        assert_eq!(args.top_k, 5);
+    }
+
+    #[test]
+    fn test_merge_config_empty_file_keeps_defaults() {
+        let matches = Args::command().get_matches_from(["spec-ai"]);
+        let mut args = Args::from_arg_matches(&matches).unwrap();
+        let default_port = args.port;
+
+        merge_config(&mut args, &matches, FileConfig::default());
+
+        assert_eq!(args.port, default_port);
+        assert!(args.api_key.is_none());
+        assert!(args.tls_cert.is_none());
     }
 }

@@ -36,3 +36,59 @@ pub fn record_auth_failure() {
 pub fn record_speculation_timeout() {
     counter!("specai_speculation_timeouts_total").increment(1);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use specai_core::types::EngineStats;
+
+    #[test]
+    fn test_record_request() {
+        record_request("GET", "/health", 200, Duration::from_millis(5));
+        record_request("POST", "/submit", 400, Duration::from_millis(50));
+    }
+
+    #[test]
+    fn test_update_engine_metrics_with_submissions() {
+        let stats = EngineStats {
+            predictions_total: 10,
+            submissions_total: 5,
+            cache_hits: 3,
+            cache_partials: 1,
+            cache_misses: 1,
+            avg_speculation_latency_ms: 15.0,
+            avg_submission_latency_ms: 20.0,
+            active_sessions: 2,
+            cached_entries: 4,
+            stale_fallbacks: 0,
+        };
+        update_engine_metrics(&stats);
+    }
+
+    #[test]
+    fn test_update_engine_metrics_zero_submissions() {
+        let stats = EngineStats {
+            predictions_total: 0,
+            submissions_total: 0,
+            cache_hits: 0,
+            cache_partials: 0,
+            cache_misses: 0,
+            avg_speculation_latency_ms: 0.0,
+            avg_submission_latency_ms: 0.0,
+            active_sessions: 0,
+            cached_entries: 0,
+            stale_fallbacks: 0,
+        };
+        update_engine_metrics(&stats);
+    }
+
+    #[test]
+    fn test_record_auth_failure() {
+        record_auth_failure();
+    }
+
+    #[test]
+    fn test_record_speculation_timeout() {
+        record_speculation_timeout();
+    }
+}

@@ -99,3 +99,169 @@ fn record_auth_failure_for_ip(state: &AppState, client_ip: Option<std::net::IpAd
     }
     *count += 1;
 }
+
+/// Check if an IP is currently locked out.
+/// Returns true if the IP has exceeded MAX_AUTH_FAILURES within AUTH_LOCKOUT_SECS.
+pub fn is_ip_locked_out(
+    auth_failures: &dashmap::DashMap<std::net::IpAddr, (u32, Instant)>,
+    ip: std::net::IpAddr,
+) -> bool {
+    if let Some(entry) = auth_failures.get(&ip) {
+        let (count, window_start) = entry.value();
+        *count >= config::MAX_AUTH_FAILURES
+            && window_start.elapsed().as_secs() < config::AUTH_LOCKOUT_SECS
+    } else {
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dashmap::DashMap;
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Arc;
+
+    fn test_ip() -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100))
+    }
+
+    fn make_test_state(api_key: Option<String>) -> AppState {
+        use specai_core::cache::SpeculativeCache;
+        use specai_core::engine::{Engine, EngineConfig};
+
+        struct DummyEmbedder;
+        #[async_trait::async_trait]
+        impl specai_core::embedder::Embedder for DummyEmbedder {
+            async fn embed(
+                &self,
+                _text: &str,
+            ) -> Result<specai_core::types::Embedding, specai_core::embedder::EmbedError>
+            {
+                Ok(vec![1.0, 0.0, 0.0])
+            }
+        }
+        struct DummyRetriever;
+        #[async_trait::async_trait]
+        impl specai_core::retriever::Retriever for DummyRetriever {
+            async fn search(
+                &self,
+                _embedding: &specai_core::types::Embedding,
+                _top_k: usize,
+            ) -> Result<Vec<specai_core::types::Document>, specai_core::retriever::RetrieveError>
+            {
+                Ok(vec![])
+            }
+        }
+
+        let engine = Arc::new(Engine::new(
+            Arc::new(DummyEmbedder),
+            Arc::new(DummyRetriever),
+            Arc::new(SpeculativeCache::new(60, 5)),
+            EngineConfig::default(),
+            None,
+        ));
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+
+        AppState {
+            engine,
+            prometheus_handle: recorder.handle(),
+            start_time: Instant::now(),
+            debounce_ms: 50,
+            api_key,
+            allowed_origins: None,
+            ws_connections_per_ip: Arc::new(DashMap::new()),
+            auth_failures: Arc::new(DashMap::new()),
+        }
+    }
+
+    #[test]
+    fn test_record_failure_increments_count() {
+        let state = make_test_state(Some("key".into()));
+        let ip = Some(test_ip());
+
+        record_auth_failure_for_ip(&state, ip);
+        let entry = state.auth_failures.get(&test_ip()).unwrap();
+        assert_eq!(entry.value().0, 1);
+
+        drop(entry);
+        record_auth_failure_for_ip(&state, ip);
+        let entry = state.auth_failures.get(&test_ip()).unwrap();
+        assert_eq!(entry.value().0, 2);
+    }
+
+    #[test]
+    fn test_record_failure_ignores_none_ip() {
+        let state = make_test_state(Some("key".into()));
+        record_auth_failure_for_ip(&state, None);
+        assert!(state.auth_failures.is_empty());
+    }
+
+    #[test]
+    fn test_lockout_triggers_after_max_failures() {
+        let state = make_test_state(Some("key".into()));
+        let ip = test_ip();
+
+        for _ in 0..config::MAX_AUTH_FAILURES {
+            record_auth_failure_for_ip(&state, Some(ip));
+        }
+
+        assert!(is_ip_locked_out(&state.auth_failures, ip));
+    }
+
+    #[test]
+    fn test_no_lockout_below_threshold() {
+        let state = make_test_state(Some("key".into()));
+        let ip = test_ip();
+
+        for _ in 0..(config::MAX_AUTH_FAILURES - 1) {
+            record_auth_failure_for_ip(&state, Some(ip));
+        }
+
+        assert!(!is_ip_locked_out(&state.auth_failures, ip));
+    }
+
+    #[test]
+    fn test_lockout_expires_after_window() {
+        let failures: DashMap<IpAddr, (u32, Instant)> = DashMap::new();
+        let ip = test_ip();
+
+        // Simulate failures from the past (beyond lockout window)
+        let expired_time =
+            Instant::now() - std::time::Duration::from_secs(config::AUTH_LOCKOUT_SECS + 1);
+        failures.insert(ip, (config::MAX_AUTH_FAILURES, expired_time));
+
+        assert!(!is_ip_locked_out(&failures, ip));
+    }
+
+    #[test]
+    fn test_success_resets_counter() {
+        let state = make_test_state(Some("key".into()));
+        let ip = test_ip();
+
+        // Accumulate failures
+        for _ in 0..5 {
+            record_auth_failure_for_ip(&state, Some(ip));
+        }
+        assert_eq!(state.auth_failures.get(&ip).unwrap().value().0, 5);
+
+        // Simulate success: remove entry (same as auth_middleware does)
+        state.auth_failures.remove(&ip);
+        assert!(state.auth_failures.get(&ip).is_none());
+        assert!(!is_ip_locked_out(&state.auth_failures, ip));
+    }
+
+    #[test]
+    fn test_different_ips_tracked_independently() {
+        let state = make_test_state(Some("key".into()));
+        let ip1 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
+        let ip2 = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+
+        for _ in 0..config::MAX_AUTH_FAILURES {
+            record_auth_failure_for_ip(&state, Some(ip1));
+        }
+
+        assert!(is_ip_locked_out(&state.auth_failures, ip1));
+        assert!(!is_ip_locked_out(&state.auth_failures, ip2));
+    }
+}

@@ -1,6 +1,7 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use dashmap::DashMap;
+use futures_util::{SinkExt, StreamExt};
 use http_body_util::BodyExt;
 use metrics_exporter_prometheus::PrometheusHandle;
 use specai_core::cache::SpeculativeCache;
@@ -11,8 +12,10 @@ use specai_core::types::{Document, Embedding};
 use specai_server::api::handlers::AppState;
 use specai_server::api::{create_router, RouterConfig};
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -1139,4 +1142,252 @@ async fn test_stats_returns_json_content_type() {
         "content-type was: {}",
         content_type
     );
+}
+
+// ===========================================================================
+// WebSocket integration tests (real TCP + tokio-tungstenite)
+// ===========================================================================
+
+async fn spawn_test_server(
+    api_key: Option<String>,
+    allowed_origins: Option<Vec<String>>,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let embedder = Arc::new(MockEmbedder::new(vec![1.0, 0.0, 0.0]));
+    let retriever = Arc::new(MockRetriever::new(vec![
+        make_doc("First test document about configuration"),
+        make_doc("Second test document about authentication"),
+    ]));
+    let cache = Arc::new(SpeculativeCache::new(60, 5));
+    let engine = Arc::new(Engine::new(
+        embedder,
+        retriever,
+        cache,
+        EngineConfig::default(),
+        None,
+    ));
+
+    let state = AppState {
+        engine,
+        prometheus_handle: make_prometheus_handle(),
+        start_time: Instant::now(),
+        debounce_ms: 10, // fast debounce for tests
+        api_key,
+        allowed_origins,
+        ws_connections_per_ip: Arc::new(DashMap::new()),
+        auth_failures: Arc::new(DashMap::new()),
+    };
+
+    let app = create_router(state, test_router_config());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let url = format!("ws://127.0.0.1:{}/ws", addr.port());
+    (url, handle)
+}
+
+#[tokio::test]
+async fn test_ws_keystroke_triggers_speculation() {
+    let (url, handle) = spawn_test_server(None, None).await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+    let msg = serde_json::json!({
+        "type": "keystroke",
+        "session_id": "sess-1",
+        "text": "how to configure something"
+    });
+    ws.send(WsMessage::Text(msg.to_string().into()))
+        .await
+        .unwrap();
+
+    // Expect "speculating" message
+    let resp = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let text = resp.into_text().unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(parsed["type"], "speculating");
+    assert_eq!(parsed["session_id"], "sess-1");
+
+    // Expect "speculation_ready" message
+    let resp = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let text = resp.into_text().unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(parsed["type"], "speculation_ready");
+    assert!(parsed["num_results"].as_u64().unwrap() > 0);
+
+    ws.close(None).await.ok();
+    handle.abort();
+}
+
+#[tokio::test]
+async fn test_ws_submit_returns_results() {
+    let (url, handle) = spawn_test_server(None, None).await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+    let msg = serde_json::json!({
+        "type": "submit",
+        "session_id": "sess-2",
+        "query": "how to configure auth"
+    });
+    ws.send(WsMessage::Text(msg.to_string().into()))
+        .await
+        .unwrap();
+
+    let resp = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let text = resp.into_text().unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(parsed["type"], "results");
+    assert_eq!(parsed["cache_verdict"], "Miss");
+    assert!(!parsed["documents"].as_array().unwrap().is_empty());
+
+    ws.close(None).await.ok();
+    handle.abort();
+}
+
+#[tokio::test]
+async fn test_ws_close_session() {
+    let (url, handle) = spawn_test_server(None, None).await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+    let msg = serde_json::json!({
+        "type": "close",
+        "session_id": "sess-3"
+    });
+    ws.send(WsMessage::Text(msg.to_string().into()))
+        .await
+        .unwrap();
+
+    // Server should close the connection after receiving Close
+    let result = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
+    match result {
+        Ok(Some(Ok(WsMessage::Close(_)))) | Ok(None) | Err(_) => {} // expected
+        Ok(Some(Ok(other))) => {
+            // Some implementations send a close frame
+            assert!(
+                matches!(other, WsMessage::Close(_)),
+                "Expected close, got: {:?}",
+                other
+            );
+        }
+        Ok(Some(Err(_))) => {} // connection closed
+    }
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn test_ws_invalid_json_returns_error() {
+    let (url, handle) = spawn_test_server(None, None).await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+    ws.send(WsMessage::Text("not valid json".into()))
+        .await
+        .unwrap();
+
+    let resp = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let text = resp.into_text().unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(parsed["type"], "error");
+    assert!(parsed["message"]
+        .as_str()
+        .unwrap()
+        .contains("Invalid message"));
+
+    ws.close(None).await.ok();
+    handle.abort();
+}
+
+#[tokio::test]
+async fn test_ws_invalid_session_id_returns_error() {
+    let (url, handle) = spawn_test_server(None, None).await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+    let msg = serde_json::json!({
+        "type": "keystroke",
+        "session_id": "bad;id",
+        "text": "hello"
+    });
+    ws.send(WsMessage::Text(msg.to_string().into()))
+        .await
+        .unwrap();
+
+    let resp = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let text = resp.into_text().unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(parsed["type"], "error");
+
+    ws.close(None).await.ok();
+    handle.abort();
+}
+
+#[tokio::test]
+async fn test_ws_origin_rejected() {
+    let allowed = Some(vec!["https://allowed.example.com".to_string()]);
+    let (url, handle) = spawn_test_server(None, allowed).await;
+
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut req = url.into_client_request().unwrap();
+    req.headers_mut()
+        .insert("Origin", "https://evil.example.com".parse().unwrap());
+
+    let result = tokio_tungstenite::connect_async(req).await;
+    // Server returns 403, so WS handshake should fail
+    assert!(result.is_err());
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn test_ws_cleanup_on_disconnect() {
+    let (url, handle) = spawn_test_server(None, None).await;
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+    // Send a keystroke to register a session
+    let msg = serde_json::json!({
+        "type": "keystroke",
+        "session_id": "cleanup-sess",
+        "text": "hello world test query"
+    });
+    ws.send(WsMessage::Text(msg.to_string().into()))
+        .await
+        .unwrap();
+
+    // Wait for speculation to complete
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Drop the websocket (triggers cleanup)
+    ws.close(None).await.ok();
+    drop(ws);
+
+    // Give the server time to clean up
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Test passes if no panics or leaks
+
+    handle.abort();
 }

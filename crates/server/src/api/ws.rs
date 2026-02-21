@@ -365,3 +365,114 @@ async fn handle_socket(
         "WebSocket connection closed"
     );
 }
+
+/// Check if an origin is allowed given the allowed_origins list.
+/// Returns true if allowed_origins is None (permissive) or origin matches the list.
+pub fn is_origin_allowed(allowed_origins: &Option<Vec<String>>, origin: &str) -> bool {
+    match allowed_origins {
+        None => true,
+        Some(allowed) => allowed.iter().any(|o| o == origin),
+    }
+}
+
+/// Check if an IP can open a new WS connection (below per-IP limit).
+pub fn check_ip_connection_limit(connections: &DashMap<IpAddr, AtomicUsize>, ip: IpAddr) -> bool {
+    if let Some(counter) = connections.get(&ip) {
+        counter.load(Ordering::Relaxed) < config::MAX_WS_CONNECTIONS_PER_IP
+    } else {
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_origin_allowed_when_no_restriction() {
+        assert!(is_origin_allowed(&None, "https://evil.com"));
+        assert!(is_origin_allowed(&None, ""));
+    }
+
+    #[test]
+    fn test_origin_allowed_matching() {
+        let origins = Some(vec![
+            "https://app.example.com".to_string(),
+            "https://staging.example.com".to_string(),
+        ]);
+        assert!(is_origin_allowed(&origins, "https://app.example.com"));
+        assert!(is_origin_allowed(&origins, "https://staging.example.com"));
+    }
+
+    #[test]
+    fn test_origin_rejected_not_matching() {
+        let origins = Some(vec!["https://app.example.com".to_string()]);
+        assert!(!is_origin_allowed(&origins, "https://evil.com"));
+        assert!(!is_origin_allowed(&origins, ""));
+        assert!(!is_origin_allowed(&origins, "https://APP.EXAMPLE.COM"));
+    }
+
+    #[test]
+    fn test_origin_empty_list_rejects_all() {
+        let origins = Some(vec![]);
+        assert!(!is_origin_allowed(&origins, "https://anything.com"));
+        assert!(!is_origin_allowed(&origins, ""));
+    }
+
+    #[test]
+    fn test_ip_connection_limit_under_max() {
+        let connections: DashMap<IpAddr, AtomicUsize> = DashMap::new();
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+
+        // No entry yet — allowed
+        assert!(check_ip_connection_limit(&connections, ip));
+
+        // Add a few connections — still allowed
+        connections.insert(ip, AtomicUsize::new(5));
+        assert!(check_ip_connection_limit(&connections, ip));
+    }
+
+    #[test]
+    fn test_ip_connection_limit_at_max() {
+        let connections: DashMap<IpAddr, AtomicUsize> = DashMap::new();
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+
+        connections.insert(ip, AtomicUsize::new(config::MAX_WS_CONNECTIONS_PER_IP));
+        assert!(!check_ip_connection_limit(&connections, ip));
+    }
+
+    #[test]
+    fn test_ip_connection_limit_different_ips() {
+        let connections: DashMap<IpAddr, AtomicUsize> = DashMap::new();
+        let ip1: IpAddr = "10.0.0.1".parse().unwrap();
+        let ip2: IpAddr = "10.0.0.2".parse().unwrap();
+
+        connections.insert(ip1, AtomicUsize::new(config::MAX_WS_CONNECTIONS_PER_IP));
+        assert!(!check_ip_connection_limit(&connections, ip1));
+        assert!(check_ip_connection_limit(&connections, ip2));
+    }
+
+    #[test]
+    fn test_ip_connection_counter_increment_decrement() {
+        let connections: DashMap<IpAddr, AtomicUsize> = DashMap::new();
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+
+        // Simulate connect
+        let counter = connections.entry(ip).or_insert_with(|| AtomicUsize::new(0));
+        counter.fetch_add(1, Ordering::Relaxed);
+        drop(counter);
+        assert_eq!(connections.get(&ip).unwrap().load(Ordering::Relaxed), 1);
+
+        // Simulate disconnect
+        let counter = connections.get(&ip).unwrap();
+        let prev = counter.fetch_sub(1, Ordering::Relaxed);
+        assert_eq!(prev, 1);
+        drop(counter);
+
+        // Counter at 0, should be cleaned up
+        if connections.get(&ip).unwrap().load(Ordering::Relaxed) == 0 {
+            connections.remove(&ip);
+        }
+        assert!(connections.get(&ip).is_none());
+    }
+}

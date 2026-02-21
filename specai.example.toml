@@ -35,6 +35,9 @@ max_body_size = 1048576
 # Authentication (uncomment to enable)
 # api_key = "my-secret-key"
 
+# WebSocket Origin validation (CSRF protection, comma-separated)
+# allowed_origins = "https://app.example.com,https://staging.example.com"
+
 # TLS (uncomment to enable HTTPS)
 # tls_cert = "/path/to/cert.pem"
 # tls_key = "/path/to/key.pem"

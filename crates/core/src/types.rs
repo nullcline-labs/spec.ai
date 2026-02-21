@@ -51,6 +51,19 @@ impl std::fmt::Display for CacheVerdict {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cache_verdict_display() {
+        assert_eq!(CacheVerdict::Hit.to_string(), "Hit");
+        assert_eq!(CacheVerdict::Partial.to_string(), "Partial");
+        assert_eq!(CacheVerdict::Miss.to_string(), "Miss");
+        assert_eq!(CacheVerdict::StaleFallback.to_string(), "StaleFallback");
+    }
+}
+
 /// Engine statistics.
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct EngineStats {

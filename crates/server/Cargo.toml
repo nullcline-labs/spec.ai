@@ -35,3 +35,5 @@ tower = { version = "0.5", features = ["util"] }
 hyper = "1"
 http-body-util = "0.1"
 async-trait = { workspace = true }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"

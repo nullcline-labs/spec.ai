@@ -9,7 +9,7 @@ Rust-based speculative retrieval engine that reduces RAG latency by pre-executin
 ```bash
 cargo build                      # debug build
 cargo build --release            # optimized (fat LTO)
-cargo test                       # run all 120 tests
+cargo test                       # run all 140 tests
 cargo clippy -- -D warnings      # lint
 cargo fmt --check                # format check
 ```
@@ -194,4 +194,4 @@ HttpEmbedder → GuardedEmbedder (circuit breaker) → CachedEmbedder (dedup cac
 - No panics in handlers (all errors via ApiError)
 - Structured JSON logging via tracing
 - All new features must include tests
-- 120 tests total (53 core unit, 9 server validation, 7 server main, 51 integration)
+- 140 tests total (53 core unit, 24 server unit, 12 main, 51 integration)

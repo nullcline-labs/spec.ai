@@ -22,3 +22,32 @@ pub fn spawn_eviction_task(
         }
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::SpeculativeResult;
+    use std::time::Instant;
+
+    #[tokio::test]
+    async fn test_eviction_task_removes_expired_entries() {
+        // TTL = 0 means entries expire immediately
+        let cache = Arc::new(SpeculativeCache::new(0, 5));
+        cache.insert(
+            &"sess1".to_string(),
+            SpeculativeResult {
+                query: "test".to_string(),
+                embedding: vec![1.0, 0.0],
+                documents: vec![],
+                created_at: Instant::now(),
+            },
+        );
+        assert_eq!(cache.session_count(), 1);
+
+        let handle = spawn_eviction_task(cache.clone(), 1);
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        assert_eq!(cache.session_count(), 0);
+        handle.abort();
+    }
+}

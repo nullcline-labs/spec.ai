@@ -557,7 +557,7 @@ mod tests {
     #[tokio::test]
     async fn test_submit_miss_no_fallback_on_retriever_failure() {
         let docs = vec![make_doc("doc1")];
-        let (engine, embedder, retriever) = make_engine(vec![1.0, 0.0, 0.0], docs);
+        let (engine, _embedder, retriever) = make_engine(vec![1.0, 0.0, 0.0], docs);
 
         let session = "session1".to_string();
         // Submit without any speculation => Miss verdict

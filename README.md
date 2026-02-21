@@ -424,7 +424,7 @@ The Docker image uses a multi-stage build (Rust 1.88 builder + Debian slim runti
 ```bash
 cargo build                      # debug build
 cargo build --release            # optimized (fat LTO)
-cargo test                       # run all 120 tests
+cargo test                       # run all 140 tests
 cargo clippy -- -D warnings      # lint (zero warnings required)
 cargo fmt --check                # format check
 ```
