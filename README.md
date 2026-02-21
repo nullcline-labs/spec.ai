@@ -35,20 +35,25 @@ crates/
 │   ├── types.rs            Document, Embedding, CacheVerdict, EngineStats
 │   ├── similarity.rs       cosine similarity + SimilarityGate
 │   ├── circuit_breaker.rs  circuit breaker (Closed → Open → HalfOpen)
+│   ├── audit.rs            structured query audit logging (specai_audit target)
 │   ├── cache/
 │   │   ├── mod.rs          SpeculativeCache (DashMap + ring buffer)
 │   │   └── eviction.rs     TTL background sweep
 │   ├── embedder/
 │   │   ├── mod.rs          Embedder trait
 │   │   ├── http.rs         HttpEmbedder (OpenAI-compatible)
-│   │   └── guarded.rs      GuardedEmbedder (with circuit breaker)
+│   │   ├── guarded.rs      GuardedEmbedder (circuit breaker decorator)
+│   │   └── cached.rs       CachedEmbedder (embedding deduplication cache)
 │   ├── retriever/
 │   │   ├── mod.rs          Retriever trait
-│   │   ├── vectorsdb.rs    VectorsDbRetriever (vectors.db REST API)
-│   │   └── guarded.rs      GuardedRetriever (with circuit breaker)
-│   └── engine.rs           orchestrator (speculate + submit)
+│   │   ├── vectorsdb.rs    VectorsDbRetriever (multi-collection fan-out search)
+│   │   └── guarded.rs      GuardedRetriever (circuit breaker decorator)
+│   ├── reranker/
+│   │   ├── mod.rs          Reranker trait + WeightedReranker
+│   │   └── text_relevance.rs  Jaccard text similarity
+│   └── engine.rs           orchestrator (speculate + submit + rerank + audit)
 └── server/         specai-server
-    ├── main.rs             CLI (clap) + startup + graceful shutdown
+    ├── main.rs             CLI (clap) + TOML config + TLS + startup
     └── api/
         ├── mod.rs          router + middleware stack
         ├── auth.rs         optional API key authentication
@@ -60,6 +65,14 @@ crates/
         ├── docs.rs         OpenAPI spec (utoipa)
         └── ws.rs           WebSocket handler + debounce + rate limiting
 ```
+
+### Embedder Composition Chain
+
+```
+HttpEmbedder → GuardedEmbedder (circuit breaker) → CachedEmbedder (dedup cache)
+```
+
+Cache hits skip both circuit breaker and HTTP calls entirely.
 
 ## Quick Start
 
@@ -79,7 +92,34 @@ SPECAI_EMBEDDING_API_KEY=sk-... cargo run --release -- \
 
 # With authentication enabled
 cargo run --release -- --api-key my-secret-key
+
+# With TOML config file
+cargo run --release -- --config specai.toml
+
+# With TLS
+cargo run --release -- --tls-cert cert.pem --tls-key key.pem
+
+# Multi-collection search
+cargo run --release -- --collection "docs,faq,guides"
+
+# With result re-ranking
+cargo run --release -- --rerank --rerank-alpha 0.7
 ```
+
+## Docker Compose
+
+A full local development stack is provided via Docker Compose:
+
+```bash
+docker compose up -d
+```
+
+This starts three services:
+- **Ollama** — local embedding model server
+- **vectors.db** — vector database
+- **spec.ai** — the retrieval engine (auto-builds from source)
+
+All services include health checks and `depends_on` conditions. See `docker-compose.override.example.yml` for development overrides.
 
 ## API Endpoints
 
@@ -129,6 +169,25 @@ Invalid input returns a `{"type": "error", ...}` message over WebSocket or HTTP 
 
 Each WebSocket connection is rate-limited to 20 keystrokes per second per session. Excess keystrokes receive an error message and are dropped.
 
+## Example Clients
+
+Ready-to-use WebSocket clients for testing and integration:
+
+```bash
+# Node.js
+cd examples/js && npm install && node client.js
+
+# Python
+pip install websockets
+python examples/python/client.py
+
+# With authentication
+node examples/js/client.js --token my-secret-key
+python examples/python/client.py --token my-secret-key
+```
+
+Both clients demonstrate keystroke streaming, speculation notifications, and result display. See [`examples/README.md`](examples/README.md) for details.
+
 ## Authentication
 
 Authentication is **optional** and disabled by default. Enable it with `--api-key`:
@@ -147,16 +206,31 @@ For WebSocket connections, auth is checked on the HTTP upgrade request.
 
 ## Configuration
 
+### Config File (TOML)
+
+spec.ai supports a TOML config file to avoid long CLI commands. Priority: **CLI > env var > config file > default**.
+
+```bash
+# Explicit path (error if not found)
+cargo run --release -- --config /path/to/specai.toml
+
+# Auto-discovery: looks for specai.toml in current directory
+cargo run --release
+```
+
+See [`specai.example.toml`](specai.example.toml) for all available options. Unknown fields are rejected to catch typos.
+
 ### CLI Flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--config` / `-c` | — | Path to TOML config file |
 | `--port` / `-p` | `3040` | Listen port |
 | `--embedding-url` | `http://localhost:11434/v1/embeddings` | Embedding API endpoint |
 | `--embedding-model` | `text-embedding-3-small` | Embedding model name |
 | `--embedding-api-key` | — | Bearer token for embedding API |
 | `--vectorsdb-url` | `http://localhost:3030` | vectors.db base URL |
-| `--collection` | `default` | Collection to search |
+| `--collection` | `default` | Comma-separated collection names |
 | `--vectorsdb-api-key` | — | Bearer token for vectors.db |
 | `--similarity-threshold` | `0.92` | Cosine threshold for cache Hit |
 | `--partial-threshold` | `0.80` | Cosine threshold for Partial |
@@ -168,6 +242,10 @@ For WebSocket connections, auth is checked on the HTTP upgrade request.
 | `--request-timeout` | `30` | Request timeout (seconds) |
 | `--max-body-size` | `1048576` | Max request body (bytes) |
 | `--api-key` | — | API key for server authentication |
+| `--rerank` | `false` | Enable result re-ranking |
+| `--rerank-alpha` | `0.7` | Re-rank weight (1.0 = vector only, 0.0 = text only) |
+| `--tls-cert` | — | TLS certificate PEM (requires `--tls-key`) |
+| `--tls-key` | — | TLS private key PEM (requires `--tls-cert`) |
 
 ### Environment Variables
 
@@ -176,6 +254,62 @@ For WebSocket connections, auth is checked on the HTTP upgrade request.
 | `SPECAI_EMBEDDING_API_KEY` | Bearer token for embedding API (fallback for `--embedding-api-key`) |
 | `SPECAI_VECTORSDB_API_KEY` | Bearer token for vectors.db (fallback for `--vectorsdb-api-key`) |
 | `RUST_LOG` | Log level (e.g. `specai_server=debug,specai_core=debug`) |
+
+## Features
+
+### Embedding Cache
+
+Deduplicates embedding API calls by caching `query_text → Embedding` in a DashMap with TTL. When the same text is requested again (e.g. identical keystrokes from multiple sessions), the cached embedding is returned without hitting the embedding API or circuit breaker.
+
+- Max 1000 entries, 5-minute TTL (configurable in `config.rs`)
+- Lazy eviction on insert when at capacity
+- Hit/miss counters exposed via `EngineStats`
+
+### Multi-Collection Search
+
+Search across multiple vector collections in parallel:
+
+```bash
+cargo run --release -- --collection "docs,faq,guides"
+```
+
+Results from all collections are merged, sorted by score descending, and truncated to `top_k`. If any collection fails, the entire search returns an error.
+
+### Result Re-ranking
+
+Optional post-retrieval re-ranking that combines vector similarity with text relevance:
+
+```bash
+cargo run --release -- --rerank --rerank-alpha 0.7
+```
+
+`score = alpha * vector_score + (1 - alpha) * jaccard_similarity`
+
+- `alpha = 1.0`: pure vector score (no re-ranking effect)
+- `alpha = 0.0`: pure text relevance
+- Default `alpha = 0.7`: balanced
+
+The `Reranker` trait is extensible — swap in a cross-encoder or other model.
+
+### Query Audit Log
+
+All speculations and submissions are logged via a dedicated tracing target `specai_audit`:
+
+```bash
+RUST_LOG=specai_audit=info cargo run --release
+```
+
+Events: `speculation_started`, `speculation_complete`, `submission_received`, `submission_result` — each with structured fields (session_id, query, verdict, num_results, latency_ms).
+
+### TLS / HTTPS
+
+Enable HTTPS/WSS with certificate and key PEM files:
+
+```bash
+cargo run --release -- --tls-cert cert.pem --tls-key key.pem
+```
+
+Both `--tls-cert` and `--tls-key` are required together. When omitted, the server runs plain HTTP as before. Uses `rustls` (no OpenSSL dependency).
 
 ## Resilience
 
@@ -248,7 +382,7 @@ The Docker image uses a multi-stage build (Rust 1.88 builder + Debian slim runti
 ```bash
 cargo build                      # debug build
 cargo build --release            # optimized (fat LTO)
-cargo test                       # run all 93 tests
+cargo test                       # run all 117 tests
 cargo clippy -- -D warnings      # lint (zero warnings required)
 cargo fmt --check                # format check
 ```

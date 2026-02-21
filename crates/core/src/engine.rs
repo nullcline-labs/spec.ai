@@ -1,6 +1,7 @@
 use crate::cache::SpeculativeCache;
 use crate::config;
 use crate::embedder::Embedder;
+use crate::reranker::Reranker;
 use crate::retriever::Retriever;
 use crate::similarity::{SimilarityGate, SimilarityGateConfig};
 use crate::types::*;
@@ -53,6 +54,7 @@ pub struct Engine {
     cache: Arc<SpeculativeCache>,
     gate: SimilarityGate,
     config: EngineConfig,
+    reranker: Option<Arc<dyn Reranker>>,
     predictions_total: AtomicU64,
     submissions_total: AtomicU64,
     cache_hits: AtomicU64,
@@ -68,6 +70,7 @@ impl Engine {
         retriever: Arc<dyn Retriever>,
         cache: Arc<SpeculativeCache>,
         config: EngineConfig,
+        reranker: Option<Arc<dyn Reranker>>,
     ) -> Self {
         let gate = SimilarityGate::new(config.similarity.clone());
         Self {
@@ -76,6 +79,7 @@ impl Engine {
             cache,
             gate,
             config,
+            reranker,
             predictions_total: AtomicU64::new(0),
             submissions_total: AtomicU64::new(0),
             cache_hits: AtomicU64::new(0),
@@ -107,9 +111,12 @@ impl Engine {
 
         let start = Instant::now();
         self.predictions_total.fetch_add(1, Ordering::Relaxed);
+        crate::audit::speculation_started(session_id, partial_query);
 
         let embedding = self.embedder.embed(partial_query).await?;
         let documents = self.retriever.search(&embedding, self.config.top_k).await?;
+        let documents = self.maybe_rerank(partial_query, documents).await;
+        let num_results = documents.len();
 
         let result = SpeculativeResult {
             query: partial_query.to_string(),
@@ -122,6 +129,7 @@ impl Engine {
         let latency_ms = start.elapsed().as_millis() as u64;
         self.speculation_latency_sum_ms
             .fetch_add(latency_ms, Ordering::Relaxed);
+        crate::audit::speculation_complete(session_id, partial_query, num_results, latency_ms);
 
         tracing::debug!(
             session = %session_id,
@@ -141,6 +149,7 @@ impl Engine {
     ) -> Result<SubmissionResult, EngineError> {
         let start = Instant::now();
         self.submissions_total.fetch_add(1, Ordering::Relaxed);
+        crate::audit::submission_received(session_id, final_query);
 
         let final_embedding = self.embedder.embed(final_query).await?;
 
@@ -160,15 +169,19 @@ impl Engine {
             }
             CacheVerdict::Partial => {
                 self.cache_partials.fetch_add(1, Ordering::Relaxed);
-                self.retriever
+                let docs = self
+                    .retriever
                     .search(&final_embedding, self.config.top_k)
-                    .await?
+                    .await?;
+                self.maybe_rerank(final_query, docs).await
             }
             CacheVerdict::Miss => {
                 self.cache_misses.fetch_add(1, Ordering::Relaxed);
-                self.retriever
+                let docs = self
+                    .retriever
                     .search(&final_embedding, self.config.top_k)
-                    .await?
+                    .await?;
+                self.maybe_rerank(final_query, docs).await
             }
         };
 
@@ -183,6 +196,14 @@ impl Engine {
         let latency_ms = start.elapsed().as_millis() as u64;
         self.submission_latency_sum_ms
             .fetch_add(latency_ms, Ordering::Relaxed);
+
+        crate::audit::submission_result(
+            session_id,
+            final_query,
+            &verdict.to_string(),
+            documents.len(),
+            latency_ms,
+        );
 
         Ok(SubmissionResult {
             documents,
@@ -217,6 +238,14 @@ impl Engine {
             },
             active_sessions: self.cache.session_count(),
             cached_entries: self.cache.entry_count() as usize,
+        }
+    }
+
+    async fn maybe_rerank(&self, query: &str, documents: Vec<Document>) -> Vec<Document> {
+        if let Some(ref reranker) = self.reranker {
+            reranker.rerank(query, documents).await
+        } else {
+            documents
         }
     }
 
@@ -323,6 +352,7 @@ mod tests {
             retriever.clone(),
             cache,
             config,
+            None,
         ));
         (engine, embedder, retriever)
     }

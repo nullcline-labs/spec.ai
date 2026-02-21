@@ -113,6 +113,7 @@ fn make_test_app(api_key: Option<String>) -> axum::Router {
         retriever,
         cache,
         EngineConfig::default(),
+        None,
     ));
 
     let state = AppState {
@@ -134,6 +135,7 @@ fn make_failing_app() -> axum::Router {
         retriever,
         cache,
         EngineConfig::default(),
+        None,
     ));
 
     let state = AppState {
@@ -1031,6 +1033,7 @@ async fn test_submit_updates_engine_stats() {
         retriever,
         cache,
         EngineConfig::default(),
+        None,
     ));
     let state = AppState {
         engine,

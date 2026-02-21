@@ -69,3 +69,12 @@ pub const CIRCUIT_BREAKER_FAILURE_THRESHOLD: u64 = 5;
 
 /// Circuit breaker: seconds to wait before half-open.
 pub const CIRCUIT_BREAKER_RECOVERY_SECS: u64 = 30;
+
+/// Maximum entries in the embedding deduplication cache.
+pub const EMBEDDING_CACHE_MAX_ENTRIES: usize = 1000;
+
+/// TTL for embedding cache entries in seconds.
+pub const EMBEDDING_CACHE_TTL_SECS: u64 = 300;
+
+/// Default re-ranking alpha weight (vector score weight).
+pub const DEFAULT_RERANK_ALPHA: f32 = 0.7;

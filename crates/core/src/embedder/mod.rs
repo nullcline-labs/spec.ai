@@ -1,3 +1,4 @@
+pub mod cached;
 pub mod guarded;
 pub mod http;
 

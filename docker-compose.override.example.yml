@@ -1,0 +1,16 @@
+# Copy to docker-compose.override.yml for local development overrides
+# docker-compose.override.yml is gitignored
+
+services:
+  specai:
+    environment:
+      RUST_LOG: "specai_server=debug,specai_core=debug,specai_audit=info"
+    # For TLS development:
+    # volumes:
+    #   - ./certs:/certs:ro
+    # command: >
+    #   --embedding-url http://ollama:11434/v1/embeddings
+    #   --embedding-model nomic-embed-text
+    #   --vectorsdb-url http://vectorsdb:3030
+    #   --tls-cert /certs/cert.pem
+    #   --tls-key /certs/key.pem

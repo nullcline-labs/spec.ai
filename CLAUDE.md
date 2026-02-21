@@ -9,7 +9,7 @@ Rust-based speculative retrieval engine that reduces RAG latency by pre-executin
 ```bash
 cargo build                      # debug build
 cargo build --release            # optimized (fat LTO)
-cargo test                       # run all 93 tests
+cargo test                       # run all 117 tests
 cargo clippy -- -D warnings      # lint
 cargo fmt --check                # format check
 ```
@@ -19,6 +19,9 @@ cargo fmt --check                # format check
 ```bash
 # Default: connects to local Ollama + vectors.db
 cargo run --release
+
+# With config file
+cargo run --release -- --config specai.toml
 
 # With OpenAI embeddings + remote vectors.db
 SPECAI_EMBEDDING_API_KEY=sk-... cargo run --release -- \
@@ -30,6 +33,12 @@ SPECAI_EMBEDDING_API_KEY=sk-... cargo run --release -- \
 
 # With authentication
 cargo run --release -- --api-key my-secret-key
+
+# With TLS
+cargo run --release -- --tls-cert cert.pem --tls-key key.pem
+
+# Docker Compose (full stack)
+docker compose up -d
 ```
 
 ## Architecture
@@ -41,20 +50,25 @@ crates/
 │   ├── types.rs            Document, Embedding, CacheVerdict, EngineStats
 │   ├── similarity.rs       cosine similarity + SimilarityGate
 │   ├── circuit_breaker.rs  circuit breaker (Closed → Open → HalfOpen)
+│   ├── audit.rs            structured query audit logging (specai_audit target)
 │   ├── cache/
 │   │   ├── mod.rs          SpeculativeCache (DashMap + ring buffer per session)
 │   │   └── eviction.rs     TTL background sweep
 │   ├── embedder/
 │   │   ├── mod.rs          Embedder trait + health_check
 │   │   ├── http.rs         HttpEmbedder (OpenAI-compatible /v1/embeddings)
-│   │   └── guarded.rs      GuardedEmbedder (circuit breaker wrapper)
+│   │   ├── guarded.rs      GuardedEmbedder (circuit breaker wrapper)
+│   │   └── cached.rs       CachedEmbedder (embedding dedup cache, DashMap + TTL)
 │   ├── retriever/
 │   │   ├── mod.rs          Retriever trait + health_check
-│   │   ├── vectorsdb.rs    VectorsDbRetriever (calls vectors.db REST API)
+│   │   ├── vectorsdb.rs    VectorsDbRetriever (multi-collection parallel fan-out)
 │   │   └── guarded.rs      GuardedRetriever (circuit breaker wrapper)
-│   └── engine.rs           Engine orchestrator (speculate + submit + check_readiness)
+│   ├── reranker/
+│   │   ├── mod.rs          Reranker trait + WeightedReranker (alpha-blended scoring)
+│   │   └── text_relevance.rs  Jaccard text similarity
+│   └── engine.rs           Engine orchestrator (speculate + submit + rerank + audit)
 └── server/         specai-server
-    ├── main.rs             CLI (clap) + startup + graceful shutdown
+    ├── main.rs             CLI (clap) + TOML config + TLS + startup + graceful shutdown
     └── api/
         ├── mod.rs          router + tower middleware stack + RouterConfig
         ├── auth.rs         optional API key authentication middleware
@@ -67,13 +81,22 @@ crates/
         └── ws.rs           WebSocket handler + debounce + rate limiting + session cleanup
 ```
 
+### Embedder Composition Chain
+
+```
+HttpEmbedder → GuardedEmbedder (circuit breaker) → CachedEmbedder (dedup cache)
+```
+
 ## Key Design Decisions
 
 - Core is async (must call external HTTP services)
 - DashMap for cache (high-contention from many WS sessions)
 - Ring buffer per session (max 5 entries, bounds memory)
-- Trait objects (Arc<dyn Embedder/Retriever>) for swappable providers
+- Trait objects (Arc<dyn Embedder/Retriever/Reranker>) for swappable providers
 - GuardedEmbedder/GuardedRetriever add circuit breaker via decorator pattern
+- CachedEmbedder wraps GuardedEmbedder: cache hits skip circuit breaker + HTTP
+- Multi-collection search via parallel fan-out + merge + sort by score
+- Optional re-ranking: WeightedReranker (alpha * vector + (1-alpha) * jaccard)
 - Debounce is server-side (consistent behavior regardless of client)
 - Three-tier verdict: Hit (>=0.92) / Partial (>=0.80) / Miss (<0.80)
 - Circuit breaker: 5 consecutive failures -> open for 30s -> half-open probe
@@ -81,6 +104,9 @@ crates/
 - Input validation on both REST and WebSocket handlers
 - Per-session keystroke rate limiting (20/sec)
 - Session cleanup on WebSocket disconnect (graceful or abrupt)
+- TOML config file support (priority: CLI > env > file > default)
+- Optional TLS via rustls (--tls-cert + --tls-key)
+- Structured audit logging via dedicated `specai_audit` tracing target
 
 ## API Endpoints
 
@@ -120,7 +146,7 @@ crates/
 |----------------------------|------------------------------------|
 | SPECAI_EMBEDDING_API_KEY   | Bearer token for embedding API     |
 | SPECAI_VECTORSDB_API_KEY   | Bearer token for vectors.db        |
-| RUST_LOG                   | Log level (e.g. specai_server=debug) |
+| RUST_LOG                   | Log level (e.g. specai_server=debug,specai_audit=info) |
 
 ## Configuration Constants (config.rs)
 
@@ -142,6 +168,9 @@ crates/
 | MAX_KEYSTROKES_PER_SECOND        | 20        | Per-session WS rate limit        |
 | CIRCUIT_BREAKER_FAILURE_THRESHOLD| 5         | Failures before circuit opens    |
 | CIRCUIT_BREAKER_RECOVERY_SECS    | 30        | Seconds before half-open         |
+| EMBEDDING_CACHE_MAX_ENTRIES      | 1000      | Max embedding cache entries      |
+| EMBEDDING_CACHE_TTL_SECS         | 300       | Embedding cache TTL (5 min)      |
+| DEFAULT_RERANK_ALPHA             | 0.7       | Re-rank weight (vector vs text)  |
 
 ## Code Conventions
 
@@ -150,4 +179,4 @@ crates/
 - No panics in handlers (all errors via ApiError)
 - Structured JSON logging via tracing
 - All new features must include tests
-- 93 tests total (33 core unit, 9 server unit, 51 server integration)
+- 117 tests total (50 core unit, 9 server validation, 7 server main, 51 integration)

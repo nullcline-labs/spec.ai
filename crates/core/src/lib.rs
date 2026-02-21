@@ -1,8 +1,10 @@
+pub mod audit;
 pub mod cache;
 pub mod circuit_breaker;
 pub mod config;
 pub mod embedder;
 pub mod engine;
+pub mod reranker;
 pub mod retriever;
 pub mod similarity;
 pub mod types;

@@ -15,6 +15,7 @@ dashmap = "6"
 reqwest = { version = "0.12", features = ["json"] }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["ws"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 tower = { version = "0.5", features = ["timeout", "limit", "buffer"] }
 tower-http = { version = "0.5", features = ["cors", "trace", "compression-gzip"] }
 clap = { version = "4", features = ["derive"] }
@@ -24,6 +25,7 @@ metrics-exporter-prometheus = "0.16"
 futures = "0.3"
 async-trait = "0.1"
 thiserror = "2"
+toml = "0.8"
 utoipa = { version = "5", features = ["axum_extras", "uuid"] }
 
 [profile.release]

@@ -5,3 +5,6 @@
 .vscode/
 *.swp
 *.swo
+docker-compose.override.yml
+examples/js/node_modules/
+examples/js/package-lock.json

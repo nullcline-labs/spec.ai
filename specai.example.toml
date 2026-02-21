@@ -1,0 +1,40 @@
+# spec.ai configuration file
+# Copy to specai.toml in your working directory, or pass via --config/-c
+#
+# Priority: CLI args > environment variables > config file > defaults
+
+port = 3040
+
+# Embedding provider
+embedding_url = "http://localhost:11434/v1/embeddings"
+embedding_model = "text-embedding-3-small"
+# embedding_api_key = "sk-..."
+
+# Vector database
+vectorsdb_url = "http://localhost:3030"
+collection = "default"
+# vectorsdb_api_key = "..."
+
+# Similarity thresholds
+similarity_threshold = 0.92
+partial_threshold = 0.80
+top_k = 10
+
+# Performance tuning
+debounce_ms = 300
+cache_ttl = 120
+rate_limit_rps = 200
+max_concurrent = 512
+request_timeout = 30
+max_body_size = 1048576
+
+# Re-ranking (disabled by default)
+# rerank = true
+# rerank_alpha = 0.7
+
+# Authentication (uncomment to enable)
+# api_key = "my-secret-key"
+
+# TLS (uncomment to enable HTTPS)
+# tls_cert = "/path/to/cert.pem"
+# tls_key = "/path/to/key.pem"

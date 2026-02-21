@@ -1,0 +1,78 @@
+# spec.ai local development environment
+#
+# Usage:
+#   docker compose up -d          # start all services
+#   docker compose logs -f specai # follow spec.ai logs
+#   docker compose down           # stop and remove containers
+#   docker compose down -v        # also remove data volumes
+#
+# After first start, pull an embedding model:
+#   docker compose exec ollama ollama pull nomic-embed-text
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+
+  # vectors.db - custom vector database service
+  # Replace the image below with your vectors.db deployment.
+  # Expected API:
+  #   POST /collections/{name}/search
+  #     Body: {"query_embedding": [...], "k": N}
+  #     Response: {"results": [{"id":"uuid","text":"...","score":0.95,"metadata":{}}]}
+  vectorsdb:
+    image: vectorsdb/vectorsdb:latest  # Replace with actual image
+    ports:
+      - "3030:3030"
+    volumes:
+      - vectorsdb_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3030/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+  specai:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3040:3040"
+    depends_on:
+      ollama:
+        condition: service_healthy
+      vectorsdb:
+        condition: service_healthy
+    environment:
+      RUST_LOG: "specai_server=info,specai_core=info,specai_audit=info"
+      # SPECAI_EMBEDDING_API_KEY: ""
+      # SPECAI_VECTORSDB_API_KEY: ""
+    command: >
+      --embedding-url http://ollama:11434/v1/embeddings
+      --embedding-model nomic-embed-text
+      --vectorsdb-url http://vectorsdb:3030
+      --collection default
+      --port 3040
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3040/health"]
+      interval: 15s
+      timeout: 3s
+      start_period: 15s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  ollama_models:
+    driver: local
+  vectorsdb_data:
+    driver: local
