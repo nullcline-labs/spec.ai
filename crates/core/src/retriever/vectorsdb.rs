@@ -38,12 +38,9 @@ struct SearchResult {
 }
 
 impl VectorsDbRetriever {
-    pub fn new(config: VectorsDbRetrieverConfig) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(config.timeout)
-            .build()
-            .expect("Failed to build HTTP client");
-        Self { client, config }
+    pub fn new(config: VectorsDbRetrieverConfig) -> Result<Self, reqwest::Error> {
+        let client = reqwest::Client::builder().timeout(config.timeout).build()?;
+        Ok(Self { client, config })
     }
 
     async fn search_collection(
@@ -160,7 +157,8 @@ mod tests {
             collections: vec!["test_col".into()],
             api_key: None,
             timeout: Duration::from_secs(5),
-        });
+        })
+        .unwrap();
         let results = retriever.search(&vec![0.1, 0.2, 0.3], 10).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].text, "hello world");
@@ -181,7 +179,8 @@ mod tests {
             collections: vec!["test_col".into()],
             api_key: None,
             timeout: Duration::from_secs(5),
-        });
+        })
+        .unwrap();
         let result = retriever.search(&vec![0.1, 0.2, 0.3], 10).await;
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -215,7 +214,8 @@ mod tests {
             collections: vec!["test_col".into()],
             api_key: Some("my-secret-key".into()),
             timeout: Duration::from_secs(5),
-        });
+        })
+        .unwrap();
         let results = retriever.search(&vec![0.1, 0.2, 0.3], 10).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].text, "authenticated result");
@@ -256,7 +256,8 @@ mod tests {
             collections: vec!["docs".into(), "faq".into()],
             api_key: None,
             timeout: Duration::from_secs(5),
-        });
+        })
+        .unwrap();
 
         let results = retriever.search(&vec![0.1, 0.2, 0.3], 10).await.unwrap();
         assert_eq!(results.len(), 2);
@@ -293,7 +294,8 @@ mod tests {
             collections: vec!["docs".into(), "broken".into()],
             api_key: None,
             timeout: Duration::from_secs(5),
-        });
+        })
+        .unwrap();
 
         let result = retriever.search(&vec![0.1, 0.2, 0.3], 10).await;
         assert!(result.is_err());
@@ -330,7 +332,8 @@ mod tests {
             collections: vec!["col_a".into(), "col_b".into()],
             api_key: None,
             timeout: Duration::from_secs(5),
-        });
+        })
+        .unwrap();
 
         // top_k=2 should return only the 2 highest scoring docs
         let results = retriever.search(&vec![0.1, 0.2, 0.3], 2).await.unwrap();

@@ -17,6 +17,7 @@ pub struct SpeculativeCache {
     sessions: DashMap<SessionId, SessionEntry>,
     ttl_secs: u64,
     max_entries_per_session: usize,
+    max_total_entries: u64,
     total_entries: AtomicU64,
 }
 
@@ -26,6 +27,7 @@ impl SpeculativeCache {
             sessions: DashMap::new(),
             ttl_secs,
             max_entries_per_session,
+            max_total_entries: config::MAX_TOTAL_CACHE_ENTRIES,
             total_entries: AtomicU64::new(0),
         }
     }
@@ -39,6 +41,15 @@ impl SpeculativeCache {
 
     /// Insert a new speculative result for a session.
     pub fn insert(&self, session_id: &SessionId, result: SpeculativeResult) {
+        if self.total_entries.load(Ordering::Relaxed) >= self.max_total_entries {
+            tracing::warn!(
+                total_entries = self.total_entries.load(Ordering::Relaxed),
+                max = self.max_total_entries,
+                "Cache at global capacity, skipping insertion"
+            );
+            return;
+        }
+
         let mut entry = self
             .sessions
             .entry(session_id.clone())
@@ -169,6 +180,21 @@ mod tests {
 
         // verify latest is correct
         assert_eq!(cache.get_latest(&sid).unwrap().query, "e");
+    }
+
+    #[test]
+    fn test_global_capacity_limit() {
+        let mut cache = SpeculativeCache::new(60, 5);
+        cache.max_total_entries = 3;
+        cache.insert(&"s1".to_string(), make_result("a"));
+        cache.insert(&"s2".to_string(), make_result("b"));
+        cache.insert(&"s3".to_string(), make_result("c"));
+        assert_eq!(cache.entry_count(), 3);
+
+        // This insertion should be rejected
+        cache.insert(&"s4".to_string(), make_result("d"));
+        assert_eq!(cache.entry_count(), 3);
+        assert!(cache.get_latest(&"s4".to_string()).is_none());
     }
 
     #[test]

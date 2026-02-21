@@ -244,6 +244,7 @@ See [`specai.example.toml`](specai.example.toml) for all available options. Unkn
 | `--api-key` | — | API key for server authentication |
 | `--rerank` | `false` | Enable result re-ranking |
 | `--rerank-alpha` | `0.7` | Re-rank weight (1.0 = vector only, 0.0 = text only) |
+| `--allowed-origins` | — | Comma-separated allowed WebSocket origins (CSRF) |
 | `--tls-cert` | — | TLS certificate PEM (requires `--tls-key`) |
 | `--tls-key` | — | TLS private key PEM (requires `--tls-cert`) |
 
@@ -329,12 +330,50 @@ When the circuit is open, the engine returns a 503 error instead of waiting for 
 |---------|------------------|--------|
 | **Hit** | >= 0.92 | Return cached results (~5ms) |
 | **Partial** | >= 0.80 | Cached results exist but may be stale; fresh retrieval performed |
+| **StaleFallback** | >= 0.80 | Partial hit but retrieval failed; serve stale cached results |
 | **Miss** | < 0.80 | No useful cached results; full embed + search |
+
+### Stale Fallback
+
+When a Partial cache hit occurs but the vector database is unreachable, the engine falls back to serving stale cached results instead of returning an error. This ensures graceful degradation — users still get results (possibly slightly outdated) rather than a failure.
 
 ### Session Cleanup
 
 - Sessions are automatically evicted after the TTL expires (default 120s)
 - When a WebSocket client disconnects (gracefully or abruptly), all its sessions are cleaned up immediately
+- Global cache capacity is limited to 50,000 entries to prevent OOM
+
+## Security
+
+### WebSocket Origin Validation
+
+Restrict which origins can connect via WebSocket to prevent CSRF attacks:
+
+```bash
+cargo run --release -- --allowed-origins "https://app.example.com,https://staging.example.com"
+```
+
+When configured, connections without a matching `Origin` header receive a 403 Forbidden response. When not configured, all origins are allowed (backwards compatible).
+
+### Per-IP Connection Limiting
+
+Each IP address is limited to 50 concurrent WebSocket connections. Excess connections receive a 429 Too Many Requests response. The counter is decremented when connections close.
+
+### Auth Brute Force Protection
+
+When API key authentication is enabled, repeated failures from the same IP trigger a lockout:
+
+- After **10 failed attempts** within a 5-minute window, the IP receives 429 Too Many Requests
+- The lockout expires after 5 minutes of inactivity
+- Successful authentication resets the failure counter
+
+### Speculation Timeout
+
+Each speculative search operation (embed + retrieve) has a 10-second timeout. If the operation doesn't complete in time, it's cancelled and an error message is sent to the client.
+
+### Startup Embedding Validation
+
+On startup, the server sends a test embedding request to validate connectivity and logs the embedding dimension. If the dimension is outside the expected range (64–4096), a warning is emitted. This is non-blocking — the server starts regardless.
 
 ## Observability
 
@@ -361,6 +400,9 @@ Available at `GET /metrics`:
 | `specai_active_sessions` | gauge | Currently active sessions |
 | `specai_cached_entries` | gauge | Total cached entries |
 | `specai_cache_hit_rate` | gauge | Cache hit rate (hits / submissions) |
+| `specai_stale_fallbacks` | gauge | Stale fallback count (Partial + retriever failure) |
+| `specai_auth_failures_total` | counter | Authentication failure count |
+| `specai_speculation_timeouts_total` | counter | Speculation timeout count |
 
 ### OpenAPI
 
@@ -382,7 +424,7 @@ The Docker image uses a multi-stage build (Rust 1.88 builder + Debian slim runti
 ```bash
 cargo build                      # debug build
 cargo build --release            # optimized (fat LTO)
-cargo test                       # run all 117 tests
+cargo test                       # run all 120 tests
 cargo clippy -- -D warnings      # lint (zero warnings required)
 cargo fmt --check                # format check
 ```

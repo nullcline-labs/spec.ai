@@ -26,4 +26,13 @@ pub fn update_engine_metrics(stats: &specai_core::types::EngineStats) {
     } else {
         0.0
     });
+    gauge!("specai_stale_fallbacks").set(stats.stale_fallbacks as f64);
+}
+
+pub fn record_auth_failure() {
+    counter!("specai_auth_failures_total").increment(1);
+}
+
+pub fn record_speculation_timeout() {
+    counter!("specai_speculation_timeouts_total").increment(1);
 }

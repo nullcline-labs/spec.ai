@@ -78,3 +78,24 @@ pub const EMBEDDING_CACHE_TTL_SECS: u64 = 300;
 
 /// Default re-ranking alpha weight (vector score weight).
 pub const DEFAULT_RERANK_ALPHA: f32 = 0.7;
+
+/// Timeout for a single speculation operation (embed + retrieve) in seconds.
+pub const SPECULATION_TIMEOUT_SECS: u64 = 10;
+
+/// Maximum total cache entries across all sessions.
+pub const MAX_TOTAL_CACHE_ENTRIES: u64 = 50_000;
+
+/// Minimum expected embedding dimension (below this, warn at startup).
+pub const MIN_EXPECTED_EMBEDDING_DIM: usize = 64;
+
+/// Maximum expected embedding dimension (above this, warn at startup).
+pub const MAX_EXPECTED_EMBEDDING_DIM: usize = 4096;
+
+/// Maximum concurrent WebSocket connections per IP address.
+pub const MAX_WS_CONNECTIONS_PER_IP: usize = 50;
+
+/// Maximum authentication failures per IP before lockout.
+pub const MAX_AUTH_FAILURES: u32 = 10;
+
+/// Duration of auth lockout in seconds after max failures.
+pub const AUTH_LOCKOUT_SECS: u64 = 300;

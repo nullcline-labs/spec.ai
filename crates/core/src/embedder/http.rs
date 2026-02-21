@@ -33,12 +33,9 @@ struct EmbeddingData {
 }
 
 impl HttpEmbedder {
-    pub fn new(config: HttpEmbedderConfig) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(config.timeout)
-            .build()
-            .expect("Failed to build HTTP client");
-        Self { client, config }
+    pub fn new(config: HttpEmbedderConfig) -> Result<Self, reqwest::Error> {
+        let client = reqwest::Client::builder().timeout(config.timeout).build()?;
+        Ok(Self { client, config })
     }
 }
 
@@ -93,7 +90,8 @@ mod tests {
             model: "test-model".into(),
             api_key: None,
             timeout: Duration::from_secs(5),
-        });
+        })
+        .unwrap();
         let result = embedder.embed("hello").await.unwrap();
         assert_eq!(result, vec![0.1_f32, 0.2_f32, 0.3_f32]);
     }
@@ -111,7 +109,8 @@ mod tests {
             model: "test-model".into(),
             api_key: None,
             timeout: Duration::from_secs(5),
-        });
+        })
+        .unwrap();
         let result = embedder.embed("hello").await;
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -139,7 +138,8 @@ mod tests {
             model: "test-model".into(),
             api_key: Some("test-secret-key".into()),
             timeout: Duration::from_secs(5),
-        });
+        })
+        .unwrap();
         let result = embedder.embed("hello").await.unwrap();
         assert_eq!(result, vec![0.5_f32, 0.6_f32]);
     }
@@ -159,7 +159,8 @@ mod tests {
             model: "test-model".into(),
             api_key: None,
             timeout: Duration::from_secs(5),
-        });
+        })
+        .unwrap();
         let result = embedder.embed("hello").await;
         assert!(result.is_err());
         match result.unwrap_err() {

@@ -6,6 +6,7 @@ use specai_core::config;
 use specai_core::embedder::cached::CachedEmbedder;
 use specai_core::embedder::guarded::GuardedEmbedder;
 use specai_core::embedder::http::{HttpEmbedder, HttpEmbedderConfig};
+use specai_core::embedder::Embedder;
 use specai_core::engine::{Engine, EngineConfig};
 use specai_core::retriever::guarded::GuardedRetriever;
 use specai_core::retriever::vectorsdb::{VectorsDbRetriever, VectorsDbRetrieverConfig};
@@ -81,6 +82,10 @@ struct Args {
     #[arg(long, default_value_t = config::DEFAULT_RERANK_ALPHA)]
     rerank_alpha: f32,
 
+    /// Comma-separated list of allowed WebSocket origins (CSRF protection)
+    #[arg(long)]
+    allowed_origins: Option<String>,
+
     /// Path to TLS certificate PEM file (enables HTTPS when paired with --tls-key)
     #[arg(long, requires = "tls_key")]
     tls_cert: Option<std::path::PathBuf>,
@@ -112,6 +117,7 @@ struct FileConfig {
     api_key: Option<String>,
     rerank: Option<bool>,
     rerank_alpha: Option<f32>,
+    allowed_origins: Option<String>,
     tls_cert: Option<String>,
     tls_key: Option<String>,
 }
@@ -188,6 +194,7 @@ fn merge_config(args: &mut Args, matches: &clap::ArgMatches, file_config: FileCo
     apply_opt!(embedding_api_key);
     apply_opt!(vectorsdb_api_key);
     apply_opt!(api_key);
+    apply_opt!(allowed_origins);
 
     // TLS paths from config file (convert String to PathBuf)
     if matches.value_source("tls_cert") != Some(ValueSource::CommandLine) && args.tls_cert.is_none()
@@ -246,7 +253,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         model: args.embedding_model.clone(),
         api_key: embedding_api_key,
         timeout: Duration::from_secs(config::EXTERNAL_REQUEST_TIMEOUT_SECS),
-    }));
+    })?);
+
+    // Startup embedding validation — non-blocking (service might not be ready in Docker Compose)
+    match embedder.embed("startup validation").await {
+        Ok(emb) => {
+            let dim = emb.len();
+            tracing::info!(embedding_dimension = dim, "Embedding service validated");
+            if !(config::MIN_EXPECTED_EMBEDDING_DIM..=config::MAX_EXPECTED_EMBEDDING_DIM)
+                .contains(&dim)
+            {
+                tracing::warn!(
+                    dim,
+                    min = config::MIN_EXPECTED_EMBEDDING_DIM,
+                    max = config::MAX_EXPECTED_EMBEDDING_DIM,
+                    "Embedding dimension outside expected range"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Embedding validation failed at startup — service may not be ready")
+        }
+    }
 
     let collections: Vec<String> = args
         .collection
@@ -260,7 +288,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         collections: collections.clone(),
         api_key: vectorsdb_api_key,
         timeout: Duration::from_secs(config::EXTERNAL_REQUEST_TIMEOUT_SECS),
-    }));
+    })?);
 
     let cache = Arc::new(SpeculativeCache::new(
         args.cache_ttl,
@@ -327,12 +355,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let prometheus_handle =
         metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()?;
 
+    let allowed_origins = args.allowed_origins.map(|s| {
+        s.split(',')
+            .map(|o| o.trim().to_string())
+            .filter(|o| !o.is_empty())
+            .collect::<Vec<_>>()
+    });
+
     let state = AppState {
         engine,
         prometheus_handle,
         start_time: Instant::now(),
         debounce_ms: args.debounce_ms,
         api_key: args.api_key,
+        allowed_origins,
+        ws_connections_per_ip: Arc::new(dashmap::DashMap::new()),
+        auth_failures: Arc::new(dashmap::DashMap::new()),
     };
 
     let router_config = RouterConfig {
@@ -389,13 +427,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         axum_server::bind_rustls(addr, tls_config)
             .handle(handle)
-            .serve(app.into_make_service())
+            .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .await?;
     } else {
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        axum::serve(listener, app)
-            .with_graceful_shutdown(wait_for_signal())
-            .await?;
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(wait_for_signal())
+        .await?;
     }
 
     tracing::info!("spec.ai shut down");

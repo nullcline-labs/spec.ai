@@ -36,6 +36,8 @@ pub enum CacheVerdict {
     Partial,
     /// No useful cached results.
     Miss,
+    /// Results from cache served as fallback after a retrieval failure.
+    StaleFallback,
 }
 
 impl std::fmt::Display for CacheVerdict {
@@ -44,6 +46,7 @@ impl std::fmt::Display for CacheVerdict {
             CacheVerdict::Hit => write!(f, "Hit"),
             CacheVerdict::Partial => write!(f, "Partial"),
             CacheVerdict::Miss => write!(f, "Miss"),
+            CacheVerdict::StaleFallback => write!(f, "StaleFallback"),
         }
     }
 }
@@ -60,4 +63,5 @@ pub struct EngineStats {
     pub avg_submission_latency_ms: f64,
     pub active_sessions: usize,
     pub cached_entries: usize,
+    pub stale_fallbacks: u64,
 }

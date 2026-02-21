@@ -9,7 +9,7 @@ Rust-based speculative retrieval engine that reduces RAG latency by pre-executin
 ```bash
 cargo build                      # debug build
 cargo build --release            # optimized (fat LTO)
-cargo test                       # run all 117 tests
+cargo test                       # run all 120 tests
 cargo clippy -- -D warnings      # lint
 cargo fmt --check                # format check
 ```
@@ -46,8 +46,8 @@ docker compose up -d
 ```
 crates/
 ├── core/           specai-core (no server deps)
-│   ├── config.rs           constants (thresholds, timeouts, limits)
-│   ├── types.rs            Document, Embedding, CacheVerdict, EngineStats
+│   ├── config.rs           29 constants (thresholds, timeouts, limits, security)
+│   ├── types.rs            Document, Embedding, CacheVerdict (Hit/Partial/Miss/StaleFallback), EngineStats
 │   ├── similarity.rs       cosine similarity + SimilarityGate
 │   ├── circuit_breaker.rs  circuit breaker (Closed → Open → HalfOpen)
 │   ├── audit.rs            structured query audit logging (specai_audit target)
@@ -68,17 +68,17 @@ crates/
 │   │   └── text_relevance.rs  Jaccard text similarity
 │   └── engine.rs           Engine orchestrator (speculate + submit + rerank + audit)
 └── server/         specai-server
-    ├── main.rs             CLI (clap) + TOML config + TLS + startup + graceful shutdown
+    ├── main.rs             CLI (clap, 23 args) + TOML config + TLS + embedding validation + startup
     └── api/
         ├── mod.rs          router + tower middleware stack + RouterConfig
-        ├── auth.rs         optional API key authentication middleware
+        ├── auth.rs         API key auth + brute force protection (IP lockout)
         ├── validation.rs   input validation (session_id, query)
         ├── errors.rs       ApiError enum → HTTP status codes
-        ├── handlers.rs     AppState + REST handlers (/health, /ready, /stats, /submit)
+        ├── handlers.rs     AppState (8 fields) + REST handlers
         ├── models.rs       request/response DTOs (with utoipa::ToSchema)
-        ├── metrics.rs      Prometheus metrics recording (all EngineStats fields)
+        ├── metrics.rs      Prometheus metrics (15 metrics: gauges + counters)
         ├── docs.rs         OpenAPI spec generation (utoipa)
-        └── ws.rs           WebSocket handler + debounce + rate limiting + session cleanup
+        └── ws.rs           WebSocket handler + debounce + rate limiting + Origin check + per-IP limit
 ```
 
 ### Embedder Composition Chain
@@ -98,15 +98,23 @@ HttpEmbedder → GuardedEmbedder (circuit breaker) → CachedEmbedder (dedup cac
 - Multi-collection search via parallel fan-out + merge + sort by score
 - Optional re-ranking: WeightedReranker (alpha * vector + (1-alpha) * jaccard)
 - Debounce is server-side (consistent behavior regardless of client)
-- Three-tier verdict: Hit (>=0.92) / Partial (>=0.80) / Miss (<0.80)
+- Four-tier verdict: Hit (>=0.92) / Partial (>=0.80) / StaleFallback (Partial + retriever fail) / Miss (<0.80)
 - Circuit breaker: 5 consecutive failures -> open for 30s -> half-open probe
+- StaleFallback: on Partial verdict, if retriever fails, serve stale cached results instead of error
 - Optional API key auth (disabled by default, backwards compatible)
+- Auth brute force protection: IP lockout after 10 failures in 5 minutes
 - Input validation on both REST and WebSocket handlers
 - Per-session keystroke rate limiting (20/sec)
+- Per-IP WebSocket connection limit (50 max, via ConnectInfo)
+- WebSocket Origin validation (optional --allowed-origins, CSRF protection)
+- Speculation timeout (10s, prevents task accumulation on slow backends)
 - Session cleanup on WebSocket disconnect (graceful or abrupt)
+- Global cache capacity limit (50k entries, prevents OOM)
+- Startup embedding validation (non-blocking, warns on dimension anomalies)
 - TOML config file support (priority: CLI > env > file > default)
 - Optional TLS via rustls (--tls-cert + --tls-key)
 - Structured audit logging via dedicated `specai_audit` tracing target
+- Constructors return Result (no panics from reqwest client builder)
 
 ## API Endpoints
 
@@ -171,6 +179,13 @@ HttpEmbedder → GuardedEmbedder (circuit breaker) → CachedEmbedder (dedup cac
 | EMBEDDING_CACHE_MAX_ENTRIES      | 1000      | Max embedding cache entries      |
 | EMBEDDING_CACHE_TTL_SECS         | 300       | Embedding cache TTL (5 min)      |
 | DEFAULT_RERANK_ALPHA             | 0.7       | Re-rank weight (vector vs text)  |
+| SPECULATION_TIMEOUT_SECS         | 10        | Speculation timeout (embed+search)|
+| MAX_TOTAL_CACHE_ENTRIES          | 50000     | Global cache capacity limit      |
+| MIN_EXPECTED_EMBEDDING_DIM       | 64        | Min embedding dimension (warn)   |
+| MAX_EXPECTED_EMBEDDING_DIM       | 4096      | Max embedding dimension (warn)   |
+| MAX_WS_CONNECTIONS_PER_IP        | 50        | Max WS connections per IP        |
+| MAX_AUTH_FAILURES                | 10        | Auth failures before IP lockout  |
+| AUTH_LOCKOUT_SECS                | 300       | Auth lockout duration (5 min)    |
 
 ## Code Conventions
 
@@ -179,4 +194,4 @@ HttpEmbedder → GuardedEmbedder (circuit breaker) → CachedEmbedder (dedup cac
 - No panics in handlers (all errors via ApiError)
 - Structured JSON logging via tracing
 - All new features must include tests
-- 117 tests total (50 core unit, 9 server validation, 7 server main, 51 integration)
+- 120 tests total (53 core unit, 9 server validation, 7 server main, 51 integration)

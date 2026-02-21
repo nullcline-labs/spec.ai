@@ -1,5 +1,7 @@
+use axum::extract::connect_info::ConnectInfo;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
@@ -7,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use specai_core::config;
 use specai_core::engine::Engine;
 use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -50,12 +54,62 @@ pub enum ServerMessage {
     Error { message: String },
 }
 
-pub async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+pub async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
+) -> impl IntoResponse {
+    // Phase 7: Origin validation
+    if let Some(ref allowed) = state.allowed_origins {
+        let origin = headers
+            .get("origin")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if !allowed.iter().any(|o| o == origin) {
+            return (StatusCode::FORBIDDEN, "Origin not allowed").into_response();
+        }
+    }
+
+    // Phase 8: Per-IP connection limit
+    let client_ip = connect_info.map(|ci| ci.0.ip());
+    if let Some(ip) = client_ip {
+        let counter = state
+            .ws_connections_per_ip
+            .entry(ip)
+            .or_insert_with(|| AtomicUsize::new(0));
+        let current = counter.fetch_add(1, Ordering::Relaxed);
+        if current >= config::MAX_WS_CONNECTIONS_PER_IP {
+            counter.fetch_sub(1, Ordering::Relaxed);
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many WebSocket connections",
+            )
+                .into_response();
+        }
+    }
+
     let debounce_ms = state.debounce_ms;
-    ws.on_upgrade(move |socket| handle_socket(socket, state.engine.clone(), debounce_ms))
+    let per_ip_map = state.ws_connections_per_ip.clone();
+    ws.on_upgrade(move |socket| {
+        handle_socket(
+            socket,
+            state.engine.clone(),
+            debounce_ms,
+            client_ip,
+            per_ip_map,
+        )
+    })
+    .into_response()
 }
 
-async fn handle_socket(socket: WebSocket, engine: Arc<Engine>, debounce_ms: u64) {
+async fn handle_socket(
+    socket: WebSocket,
+    engine: Arc<Engine>,
+    debounce_ms: u64,
+    client_ip: Option<IpAddr>,
+    ws_connections_per_ip: Arc<DashMap<IpAddr, AtomicUsize>>,
+) {
     let (mut sender, mut receiver) = socket.split();
     let (tx, mut rx) = mpsc::channel::<ServerMessage>(64);
 
@@ -161,9 +215,12 @@ async fn handle_socket(socket: WebSocket, engine: Arc<Engine>, debounce_ms: u64)
                         })
                         .await;
 
+                    let speculation_timeout = Duration::from_secs(config::SPECULATION_TIMEOUT_SECS);
                     let start = Instant::now();
-                    match engine.speculate(&sid, &query).await {
-                        Ok(()) => {
+                    match tokio::time::timeout(speculation_timeout, engine.speculate(&sid, &query))
+                        .await
+                    {
+                        Ok(Ok(())) => {
                             let latency_ms = start.elapsed().as_millis() as u64;
                             let num_results = engine
                                 .cache()
@@ -179,11 +236,25 @@ async fn handle_socket(socket: WebSocket, engine: Arc<Engine>, debounce_ms: u64)
                                 })
                                 .await;
                         }
-                        Err(e) => {
+                        Ok(Err(e)) => {
                             tracing::warn!(session = %sid, "Speculation failed: {}", e);
                             let _ = tx
                                 .send(ServerMessage::Error {
                                     message: format!("Speculation failed: {}", e),
+                                })
+                                .await;
+                        }
+                        Err(_elapsed) => {
+                            tracing::warn!(
+                                session = %sid,
+                                query = %query,
+                                timeout_secs = config::SPECULATION_TIMEOUT_SECS,
+                                "Speculation timed out"
+                            );
+                            super::metrics::record_speculation_timeout();
+                            let _ = tx
+                                .send(ServerMessage::Error {
+                                    message: "Speculation timed out".to_string(),
                                 })
                                 .await;
                         }
@@ -275,6 +346,17 @@ async fn handle_socket(socket: WebSocket, engine: Arc<Engine>, debounce_ms: u64)
         }
         debounce_handles.remove(sid);
         engine.close_session(sid);
+    }
+
+    // Decrement per-IP connection count
+    if let Some(ip) = client_ip {
+        if let Some(counter) = ws_connections_per_ip.get(&ip) {
+            let prev = counter.fetch_sub(1, Ordering::Relaxed);
+            if prev <= 1 {
+                drop(counter);
+                ws_connections_per_ip.remove(&ip);
+            }
+        }
     }
 
     send_task.abort();

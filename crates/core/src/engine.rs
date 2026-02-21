@@ -60,6 +60,7 @@ pub struct Engine {
     cache_hits: AtomicU64,
     cache_partials: AtomicU64,
     cache_misses: AtomicU64,
+    stale_fallbacks: AtomicU64,
     speculation_latency_sum_ms: AtomicU64,
     submission_latency_sum_ms: AtomicU64,
 }
@@ -85,6 +86,7 @@ impl Engine {
             cache_hits: AtomicU64::new(0),
             cache_partials: AtomicU64::new(0),
             cache_misses: AtomicU64::new(0),
+            stale_fallbacks: AtomicU64::new(0),
             speculation_latency_sum_ms: AtomicU64::new(0),
             submission_latency_sum_ms: AtomicU64::new(0),
         }
@@ -169,11 +171,41 @@ impl Engine {
             }
             CacheVerdict::Partial => {
                 self.cache_partials.fetch_add(1, Ordering::Relaxed);
-                let docs = self
+                match self
                     .retriever
                     .search(&final_embedding, self.config.top_k)
-                    .await?;
-                self.maybe_rerank(final_query, docs).await
+                    .await
+                {
+                    Ok(docs) => self.maybe_rerank(final_query, docs).await,
+                    Err(e) => {
+                        tracing::warn!(
+                            session = %session_id,
+                            error = %e,
+                            "Retrieval failed on Partial verdict, falling back to stale cache"
+                        );
+                        self.stale_fallbacks.fetch_add(1, Ordering::Relaxed);
+                        let stale_docs = self
+                            .cache
+                            .get_latest(session_id)
+                            .map(|r| r.documents)
+                            .unwrap_or_default();
+                        let latency_ms = start.elapsed().as_millis() as u64;
+                        self.submission_latency_sum_ms
+                            .fetch_add(latency_ms, Ordering::Relaxed);
+                        crate::audit::submission_result(
+                            session_id,
+                            final_query,
+                            "StaleFallback",
+                            stale_docs.len(),
+                            latency_ms,
+                        );
+                        return Ok(SubmissionResult {
+                            documents: stale_docs,
+                            verdict: CacheVerdict::StaleFallback,
+                            latency_ms,
+                        });
+                    }
+                }
             }
             CacheVerdict::Miss => {
                 self.cache_misses.fetch_add(1, Ordering::Relaxed);
@@ -183,6 +215,7 @@ impl Engine {
                     .await?;
                 self.maybe_rerank(final_query, docs).await
             }
+            CacheVerdict::StaleFallback => unreachable!("StaleFallback is only set internally"),
         };
 
         let result = SpeculativeResult {
@@ -238,6 +271,7 @@ impl Engine {
             },
             active_sessions: self.cache.session_count(),
             cached_entries: self.cache.entry_count() as usize,
+            stale_fallbacks: self.stale_fallbacks.load(Ordering::Relaxed),
         }
     }
 
@@ -491,6 +525,50 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, EngineError::Embed(_)));
+    }
+
+    #[tokio::test]
+    async fn test_submit_partial_fallback_on_retriever_failure() {
+        let docs = vec![make_doc("cached_doc")];
+        let (engine, embedder, retriever) = make_engine(vec![1.0, 0.0, 0.0], docs);
+
+        let session = "session1".to_string();
+        // Speculate successfully with [1,0,0]
+        engine
+            .speculate(&session, "how to configure auth")
+            .await
+            .unwrap();
+
+        // Change embedding to something close but not identical (Partial range)
+        // cos([1,0,0], [0.9,0.4,0]) = 0.9 / (1.0 * 0.985) ≈ 0.913 => Partial (>= 0.80, < 0.92)
+        embedder.set_embedding(vec![0.9, 0.4, 0.0]);
+        retriever.set_failing(true);
+
+        let result = engine
+            .submit(&session, "how to configure authentication")
+            .await
+            .unwrap();
+
+        assert_eq!(result.verdict, CacheVerdict::StaleFallback);
+        assert!(!result.documents.is_empty());
+        assert_eq!(result.documents[0].text, "cached_doc");
+    }
+
+    #[tokio::test]
+    async fn test_submit_miss_no_fallback_on_retriever_failure() {
+        let docs = vec![make_doc("doc1")];
+        let (engine, embedder, retriever) = make_engine(vec![1.0, 0.0, 0.0], docs);
+
+        let session = "session1".to_string();
+        // Submit without any speculation => Miss verdict
+        retriever.set_failing(true);
+
+        let result = engine
+            .submit(&session, "something completely different")
+            .await;
+
+        // Miss + retriever failure => error propagated (no fallback)
+        assert!(result.is_err());
     }
 
     #[tokio::test]

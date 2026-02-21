@@ -3,8 +3,11 @@ use super::models::*;
 use super::validation;
 use axum::extract::State;
 use axum::Json;
+use dashmap::DashMap;
 use metrics_exporter_prometheus::PrometheusHandle;
 use specai_core::engine::Engine;
+use std::net::IpAddr;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -15,6 +18,9 @@ pub struct AppState {
     pub start_time: Instant,
     pub debounce_ms: u64,
     pub api_key: Option<String>,
+    pub allowed_origins: Option<Vec<String>>,
+    pub ws_connections_per_ip: Arc<DashMap<IpAddr, AtomicUsize>>,
+    pub auth_failures: Arc<DashMap<IpAddr, (u32, Instant)>>,
 }
 
 #[utoipa::path(get, path = "/health", responses((status = 200, body = HealthResponse)))]

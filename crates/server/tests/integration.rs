@@ -1,5 +1,6 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use dashmap::DashMap;
 use http_body_util::BodyExt;
 use metrics_exporter_prometheus::PrometheusHandle;
 use specai_core::cache::SpeculativeCache;
@@ -122,6 +123,9 @@ fn make_test_app(api_key: Option<String>) -> axum::Router {
         start_time: Instant::now(),
         debounce_ms: 50,
         api_key,
+        allowed_origins: None,
+        ws_connections_per_ip: Arc::new(DashMap::new()),
+        auth_failures: Arc::new(DashMap::new()),
     };
     create_router(state, test_router_config())
 }
@@ -144,6 +148,9 @@ fn make_failing_app() -> axum::Router {
         start_time: Instant::now(),
         debounce_ms: 50,
         api_key: None,
+        allowed_origins: None,
+        ws_connections_per_ip: Arc::new(DashMap::new()),
+        auth_failures: Arc::new(DashMap::new()),
     };
     create_router(state, test_router_config())
 }
@@ -1041,6 +1048,9 @@ async fn test_submit_updates_engine_stats() {
         start_time: Instant::now(),
         debounce_ms: 50,
         api_key: None,
+        allowed_origins: None,
+        ws_connections_per_ip: Arc::new(DashMap::new()),
+        auth_failures: Arc::new(DashMap::new()),
     };
 
     // First: submit a query
