@@ -8,6 +8,7 @@ use serde_json::json;
 use specai_core::config;
 use std::net::SocketAddr;
 use std::time::Instant;
+use subtle::ConstantTimeEq;
 
 use super::handlers::AppState;
 
@@ -59,7 +60,7 @@ pub async fn auth_middleware(
     match auth_header {
         Some(value) if value.starts_with("Bearer ") => {
             let token = &value[7..];
-            if token == expected_key {
+            if token.as_bytes().ct_eq(expected_key.as_bytes()).into() {
                 // Reset failure counter on success
                 if let Some(ip) = client_ip {
                     state.auth_failures.remove(&ip);

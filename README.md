@@ -245,6 +245,7 @@ See [`specai.example.toml`](specai.example.toml) for all available options. Unkn
 | `--rerank` | `false` | Enable result re-ranking |
 | `--rerank-alpha` | `0.7` | Re-rank weight (1.0 = vector only, 0.0 = text only) |
 | `--allowed-origins` | — | Comma-separated allowed WebSocket origins (CSRF) |
+| `--metrics-interval` | `15` | Metrics update interval (seconds) |
 | `--tls-cert` | — | TLS certificate PEM (requires `--tls-key`) |
 | `--tls-key` | — | TLS private key PEM (requires `--tls-cert`) |
 
@@ -337,6 +338,10 @@ When the circuit is open, the engine returns a 503 error instead of waiting for 
 
 When a Partial cache hit occurs but the vector database is unreachable, the engine falls back to serving stale cached results instead of returning an error. This ensures graceful degradation — users still get results (possibly slightly outdated) rather than a failure.
 
+### Graceful Shutdown
+
+On SIGINT/SIGTERM the server drains in-flight connections with a 30-second timeout before shutting down. New connections are rejected immediately while existing requests finish.
+
 ### Session Cleanup
 
 - Sessions are automatically evicted after the TTL expires (default 120s)
@@ -370,6 +375,10 @@ When API key authentication is enabled, repeated failures from the same IP trigg
 ### Speculation Timeout
 
 Each speculative search operation (embed + retrieve) has a 10-second timeout. If the operation doesn't complete in time, it's cancelled and an error message is sent to the client.
+
+### Constant-Time Auth Comparison
+
+API key authentication uses constant-time comparison (`subtle::ConstantTimeEq`) to prevent timing attacks that could leak the key byte-by-byte.
 
 ### Startup Embedding Validation
 
@@ -424,7 +433,7 @@ The Docker image uses a multi-stage build (Rust 1.88 builder + Debian slim runti
 ```bash
 cargo build                      # debug build
 cargo build --release            # optimized (fat LTO)
-cargo test                       # run all 140 tests
+cargo test                       # run all 170 tests
 cargo clippy -- -D warnings      # lint (zero warnings required)
 cargo fmt --check                # format check
 ```

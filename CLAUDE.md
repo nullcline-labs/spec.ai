@@ -9,7 +9,7 @@ Rust-based speculative retrieval engine that reduces RAG latency by pre-executin
 ```bash
 cargo build                      # debug build
 cargo build --release            # optimized (fat LTO)
-cargo test                       # run all 140 tests
+cargo test                       # run all 170 tests
 cargo clippy -- -D warnings      # lint
 cargo fmt --check                # format check
 ```
@@ -46,7 +46,7 @@ docker compose up -d
 ```
 crates/
 ├── core/           specai-core (no server deps)
-│   ├── config.rs           29 constants (thresholds, timeouts, limits, security)
+│   ├── config.rs           36 constants (thresholds, timeouts, limits, security)
 │   ├── types.rs            Document, Embedding, CacheVerdict (Hit/Partial/Miss/StaleFallback), EngineStats
 │   ├── similarity.rs       cosine similarity + SimilarityGate
 │   ├── circuit_breaker.rs  circuit breaker (Closed → Open → HalfOpen)
@@ -68,7 +68,7 @@ crates/
 │   │   └── text_relevance.rs  Jaccard text similarity
 │   └── engine.rs           Engine orchestrator (speculate + submit + rerank + audit)
 └── server/         specai-server
-    ├── main.rs             CLI (clap, 23 args) + TOML config + TLS + embedding validation + startup
+    ├── main.rs             CLI (clap, 24 args) + TOML config + TLS + embedding validation + startup
     └── api/
         ├── mod.rs          router + tower middleware stack + RouterConfig
         ├── auth.rs         API key auth + brute force protection (IP lockout)
@@ -115,6 +115,9 @@ HttpEmbedder → GuardedEmbedder (circuit breaker) → CachedEmbedder (dedup cac
 - Optional TLS via rustls (--tls-cert + --tls-key)
 - Structured audit logging via dedicated `specai_audit` tracing target
 - Constructors return Result (no panics from reqwest client builder)
+- Constant-time API key comparison (subtle::ConstantTimeEq, anti timing attack)
+- Graceful shutdown with 30s drain timeout (GRACEFUL_SHUTDOWN_TIMEOUT_SECS)
+- Configurable metrics update interval (--metrics-interval, default 15s)
 
 ## API Endpoints
 
@@ -186,6 +189,8 @@ HttpEmbedder → GuardedEmbedder (circuit breaker) → CachedEmbedder (dedup cac
 | MAX_WS_CONNECTIONS_PER_IP        | 50        | Max WS connections per IP        |
 | MAX_AUTH_FAILURES                | 10        | Auth failures before IP lockout  |
 | AUTH_LOCKOUT_SECS                | 300       | Auth lockout duration (5 min)    |
+| GRACEFUL_SHUTDOWN_TIMEOUT_SECS   | 30        | Shutdown drain timeout           |
+| DEFAULT_METRICS_INTERVAL_SECS    | 15        | Metrics update interval          |
 
 ## Code Conventions
 
@@ -194,4 +199,4 @@ HttpEmbedder → GuardedEmbedder (circuit breaker) → CachedEmbedder (dedup cac
 - No panics in handlers (all errors via ApiError)
 - Structured JSON logging via tracing
 - All new features must include tests
-- 140 tests total (53 core unit, 24 server unit, 12 main, 51 integration)
+- 170 tests total (63 core unit, 34 server unit, 15 main, 58 integration)

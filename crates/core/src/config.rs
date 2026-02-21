@@ -99,3 +99,9 @@ pub const MAX_AUTH_FAILURES: u32 = 10;
 
 /// Duration of auth lockout in seconds after max failures.
 pub const AUTH_LOCKOUT_SECS: u64 = 300;
+
+/// Graceful shutdown drain timeout in seconds.
+pub const GRACEFUL_SHUTDOWN_TIMEOUT_SECS: u64 = 30;
+
+/// Default metrics update interval in seconds.
+pub const DEFAULT_METRICS_INTERVAL_SECS: u64 = 15;

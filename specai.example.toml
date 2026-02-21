@@ -28,6 +28,9 @@ max_concurrent = 512
 request_timeout = 30
 max_body_size = 1048576
 
+# Metrics update interval (seconds)
+# metrics_interval = 15
+
 # Re-ranking (disabled by default)
 # rerank = true
 # rerank_alpha = 0.7

@@ -86,6 +86,10 @@ struct Args {
     #[arg(long)]
     allowed_origins: Option<String>,
 
+    /// Metrics update interval in seconds
+    #[arg(long, default_value_t = config::DEFAULT_METRICS_INTERVAL_SECS)]
+    metrics_interval: u64,
+
     /// Path to TLS certificate PEM file (enables HTTPS when paired with --tls-key)
     #[arg(long, requires = "tls_key")]
     tls_cert: Option<std::path::PathBuf>,
@@ -117,6 +121,7 @@ struct FileConfig {
     api_key: Option<String>,
     rerank: Option<bool>,
     rerank_alpha: Option<f32>,
+    metrics_interval: Option<u64>,
     allowed_origins: Option<String>,
     tls_cert: Option<String>,
     tls_key: Option<String>,
@@ -179,6 +184,7 @@ fn merge_config(args: &mut Args, matches: &clap::ArgMatches, file_config: FileCo
     apply!(max_body_size);
     apply!(rerank);
     apply!(rerank_alpha);
+    apply!(metrics_interval);
 
     // Option<String> fields: CLI > file config
     macro_rules! apply_opt {
@@ -362,8 +368,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     spawn_eviction_task(cache, config::CACHE_EVICTION_INTERVAL_SECS);
 
     let metrics_engine = engine.clone();
+    let metrics_interval_secs = args.metrics_interval;
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(15));
+        let mut interval = tokio::time::interval(Duration::from_secs(metrics_interval_secs));
         loop {
             interval.tick().await;
             specai_server::api::metrics::update_engine_metrics(&metrics_engine.stats());
@@ -440,7 +447,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let shutdown_handle = handle.clone();
         tokio::spawn(async move {
             wait_for_signal().await;
-            shutdown_handle.graceful_shutdown(None);
+            tracing::info!(
+                timeout_secs = config::GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+                "Draining connections"
+            );
+            shutdown_handle.graceful_shutdown(Some(Duration::from_secs(
+                config::GRACEFUL_SHUTDOWN_TIMEOUT_SECS,
+            )));
         });
 
         axum_server::bind_rustls(addr, tls_config)
@@ -655,6 +668,7 @@ unknown_field = "bad""#;
             api_key: Some("file-key".to_string()),
             rerank: Some(true),
             rerank_alpha: Some(0.5),
+            metrics_interval: Some(30),
             embedding_api_key: Some("embed-key".to_string()),
             vectorsdb_api_key: Some("db-key".to_string()),
             allowed_origins: Some("https://example.com".to_string()),
@@ -671,6 +685,7 @@ unknown_field = "bad""#;
         assert_eq!(args.debounce_ms, 500);
         assert!(args.rerank);
         assert_eq!(args.rerank_alpha, 0.5);
+        assert_eq!(args.metrics_interval, 30);
         assert_eq!(args.api_key.as_deref(), Some("file-key"));
         assert_eq!(args.embedding_api_key.as_deref(), Some("embed-key"));
         assert_eq!(args.vectorsdb_api_key.as_deref(), Some("db-key"));
